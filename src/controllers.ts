@@ -12,10 +12,15 @@ import {
   Res,
   UseGuards,
 } from "@nestjs/common";
-import { ApiCookieAuth, ApiTags } from "@nestjs/swagger";
+import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import type { Request, Response } from "express";
-import { AdminAuth, AdminGuard } from "./auth";
+import {
+  AdminAuth,
+  AdminGuard,
+  bearerToken,
+  refreshCookieOptions,
+} from "./auth";
 import { Audit } from "./audit";
 import { Database } from "./database";
 import { CookieDto, LoginDto, LogQueryDto, PageDto, SettingsDto } from "./dto";
@@ -34,43 +39,55 @@ export class AuthController {
     @Body() body: LoginDto,
     @Res({ passthrough: true }) response: Response,
   ) {
-    const { token, expiresAt } = await this.auth.login(
+    const { refreshToken, expiresAt, ...result } = await this.auth.login(
       body.username,
       body.password,
     );
-    response.cookie("monitor_session", token, {
-      httpOnly: true,
-      sameSite: "strict",
-      secure: process.env.NODE_ENV === "production",
+    response.cookie("monitor_refresh", refreshToken, {
+      ...refreshCookieOptions(),
       expires: expiresAt,
-      path: "/",
     });
+    response.clearCookie("monitor_session", { path: "/" });
+    response.setHeader("Cache-Control", "no-store");
     await this.audit.record(
       "ADMIN_LOGIN",
       "Operator masuk ke panel monitoring.",
     );
-    return { username: process.env.ADMIN_USERNAME || "geats", expiresAt };
+    return result;
+  }
+  @Post("refresh")
+  @Throttle({ default: { limit: 60, ttl: 60000 } })
+  async refresh(
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    response.setHeader("Cache-Control", "no-store");
+    const { refreshToken, expiresAt, ...result } = await this.auth.refresh(
+      request.cookies?.monitor_refresh,
+    );
+    response.cookie("monitor_refresh", refreshToken, {
+      ...refreshCookieOptions(),
+      expires: expiresAt,
+    });
+    return result;
   }
   @Get("me")
   @UseGuards(AdminGuard)
-  @ApiCookieAuth()
+  @ApiBearerAuth()
   me() {
     return { username: process.env.ADMIN_USERNAME || "geats" };
   }
   @Post("logout")
-  @UseGuards(AdminGuard)
-  @ApiCookieAuth()
   async logout(
     @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
   ) {
-    await this.auth.logout(request.cookies?.monitor_session);
-    response.clearCookie("monitor_session", {
-      path: "/",
-      httpOnly: true,
-      sameSite: "strict",
-      secure: process.env.NODE_ENV === "production",
-    });
+    await this.auth.logout(
+      request.cookies?.monitor_refresh,
+      bearerToken(request),
+    );
+    response.clearCookie("monitor_refresh", refreshCookieOptions());
+    response.setHeader("Cache-Control", "no-store");
     await this.audit.record(
       "ADMIN_LOGOUT",
       "Operator keluar dari panel. Status monitoring tidak diubah.",
@@ -80,7 +97,7 @@ export class AuthController {
 }
 
 @ApiTags("Monitor")
-@ApiCookieAuth()
+@ApiBearerAuth()
 @UseGuards(AdminGuard)
 @Controller("monitor")
 export class MonitorController {
@@ -100,7 +117,7 @@ export class MonitorController {
 }
 
 @ApiTags("Bilcode session")
-@ApiCookieAuth()
+@ApiBearerAuth()
 @UseGuards(AdminGuard)
 @Controller("session")
 export class SessionController {
@@ -117,7 +134,7 @@ export class SessionController {
 }
 
 @ApiTags("Configuration")
-@ApiCookieAuth()
+@ApiBearerAuth()
 @UseGuards(AdminGuard)
 @Controller("settings")
 export class SettingsController {
@@ -134,7 +151,7 @@ export class SettingsController {
 }
 
 @ApiTags("Logs")
-@ApiCookieAuth()
+@ApiBearerAuth()
 @UseGuards(AdminGuard)
 @Controller("logs")
 export class LogsController {

@@ -16,6 +16,16 @@ if (!existsSync(environment)) {
   writeFileSync(environment, contents, { mode: 0o600 });
   console.log("Created .env with private local credentials.");
 }
+let current = readFileSync(environment, "utf8");
+for (const name of ["JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET"]) {
+  if (!new RegExp(`^${name}=`, "m").test(current))
+    current += `\n${name}=${randomBytes(32).toString("hex")}\n`;
+  current = current.replace(
+    new RegExp(`${name}=REPLACE_WITH_[A-Z_]+`),
+    `${name}=${randomBytes(32).toString("hex")}`,
+  );
+}
+writeFileSync(environment, current, { mode: 0o600 });
 const docker = spawnSync("docker", ["--version"], { encoding: "utf8" });
 if (docker.status !== 0)
   throw new Error(
@@ -39,9 +49,9 @@ function run(command, args) {
   if (result.status !== 0) throw new Error(`Setup command failed: ${command}`);
 }
 run("docker", ["compose", "-p", "bilcode-monitoring-local", "up", "-d"]);
-run("npm", ["run", "db:generate"]);
-run("npm", ["run", "db:migrate"]);
-console.log("Backend ready. Run npm run dev; API: http://127.0.0.1:4100/api.");
+run("pnpm", ["run", "db:generate"]);
+run("pnpm", ["run", "db:migrate"]);
+console.log("Backend ready. Run pnpm dev; API: http://127.0.0.1:4100/api.");
 console.log(
   "Admin credentials are in .env; monitoring starts stopped. Run the frontend from its own repository.",
 );

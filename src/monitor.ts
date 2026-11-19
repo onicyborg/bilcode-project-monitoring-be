@@ -111,7 +111,13 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit() {
-    this.lease = new Client({ connectionString: process.env.DATABASE_URL });
+    // Session advisory locks require a direct connection, outside Neon's transaction pooler.
+    this.lease = new Client({
+      connectionString:
+        process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL,
+      keepAlive: true,
+      connectionTimeoutMillis: 15000,
+    });
     await this.lease.connect();
     const lock = await this.lease.query(
       "SELECT pg_try_advisory_lock(19860204, 741) AS acquired",
@@ -127,6 +133,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
       clearTimeout(this.timer);
       this.controller?.abort();
       console.error("Monitoring lease connection lost; monitoring halted.");
+      process.kill(process.pid, "SIGTERM");
     });
     await this.db.configuration.upsert({
       where: { id: "main" },

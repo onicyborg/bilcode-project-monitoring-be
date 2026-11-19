@@ -6,6 +6,7 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { createDecipheriv } from "node:crypto";
 import dotenv from "dotenv";
+import { JwtService } from "@nestjs/jwt";
 import pg from "pg";
 
 const base = "http://127.0.0.1:4101/api";
@@ -14,12 +15,21 @@ const password = "integration-test-password-2026";
 const key = "17".repeat(32);
 const config = dotenv.parse(readFileSync(".env"));
 const databaseUrl = new URL(config.DATABASE_URL);
+if (!["localhost", "127.0.0.1", "[::1]"].includes(databaseUrl.hostname)) {
+  throw new Error(
+    "Integration tests require local PostgreSQL, never the Neon application database.",
+  );
+}
 databaseUrl.pathname = "/bilcode_monitoring_integration_test";
 const testUrl = databaseUrl.toString();
 let pool;
 let processApi;
 let output = "";
 let cookie;
+let accessToken;
+const jwt = new JwtService();
+const accessSecret = "31".repeat(32);
+const refreshSecret = "41".repeat(32);
 let mock;
 let server;
 let upstreamPort;
@@ -58,6 +68,9 @@ async function request(
     method,
     headers: {
       ...(withAuth && cookie ? { Cookie: cookie } : {}),
+      ...(withAuth && accessToken
+        ? { Authorization: `Bearer ${accessToken}` }
+        : {}),
       ...(suppliedOrigin ? { Origin: suppliedOrigin } : {}),
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
@@ -82,11 +95,14 @@ async function startApi() {
     env: {
       ...process.env,
       DATABASE_URL: testUrl,
+      DIRECT_DATABASE_URL: testUrl,
       API_PORT: "4101",
       APP_ORIGIN: origin,
       ADMIN_USERNAME: "test-operator",
       ADMIN_PASSWORD: password,
       ENCRYPTION_KEY: key,
+      JWT_ACCESS_SECRET: accessSecret,
+      JWT_REFRESH_SECRET: refreshSecret,
       INITIAL_GOWA_PASSWORD: "mock-gowa-secret",
       BILCODE_API_URL: `http://127.0.0.1:${upstreamPort}/api`,
       GOWA_ALLOWED_HOSTS: "127.0.0.1",
@@ -238,7 +254,14 @@ describe(
       const migration = spawnSync(
         process.execPath,
         ["node_modules/prisma/build/index.js", "migrate", "deploy"],
-        { env: { ...process.env, DATABASE_URL: testUrl }, encoding: "utf8" },
+        {
+          env: {
+            ...process.env,
+            DATABASE_URL: testUrl,
+            DIRECT_DATABASE_URL: testUrl,
+          },
+          encoding: "utf8",
+        },
       );
       assert.equal(migration.status, 0, migration.stderr);
       pool = new pg.Pool({ connectionString: testUrl });
@@ -252,6 +275,7 @@ describe(
       assert.equal(login.status, 201);
       assert.match(login.headers.get("set-cookie"), /HttpOnly/i);
       cookie = login.headers.get("set-cookie").split(";")[0];
+      accessToken = login.data.access_token;
     });
     after(async () => {
       await stopApi();
@@ -309,6 +333,126 @@ describe(
         ).status,
         401,
       );
+    });
+    test("issues 15-minute access JWTs and rejects expired, tampered and refresh tokens as bearer", async () => {
+      const claims = jwt.verify(accessToken, { secret: accessSecret });
+      assert.equal(claims.exp - claims.iat, 900);
+      const original = accessToken;
+      const payload = { sid: claims.sid, purpose: "access" };
+      accessToken = jwt.sign(payload, {
+        secret: accessSecret,
+        issuer: "bilcode-project-monitoring",
+        audience: "monitor-access",
+        subject: "test-operator",
+        expiresIn: -1,
+      });
+      assert.equal((await request("/auth/me")).status, 401);
+      accessToken = original.slice(0, -8) + "tampered";
+      assert.equal((await request("/auth/me")).status, 401);
+      accessToken = cookie.split("=")[1];
+      assert.equal((await request("/auth/me")).status, 401);
+      accessToken = original;
+      assert.equal((await request("/auth/me")).status, 200);
+    });
+    test("rotates refresh tokens once, stores hashes and survives an expired access token", async () => {
+      const oldCookie = cookie;
+      const oldAccess = accessToken;
+      accessToken = "expired";
+      const refreshed = await request("/auth/refresh", "POST");
+      assert.equal(refreshed.status, 201);
+      assert.equal(refreshed.data.expires_in, 900);
+      assert.match(refreshed.headers.get("cache-control"), /no-store/);
+      const header = refreshed.headers.get("set-cookie");
+      assert.match(header, /HttpOnly/i);
+      assert.match(header, /SameSite=Strict/i);
+      assert.match(header, /Path=\/api\/auth/i);
+      const newCookie = header.split(";")[0];
+      assert.notEqual(newCookie, oldCookie);
+      assert.equal((await request("/auth/refresh", "POST")).status, 401);
+      cookie = newCookie;
+      accessToken = refreshed.data.access_token;
+      assert.equal((await request("/auth/me")).status, 200);
+      const claims = jwt.verify(accessToken, { secret: accessSecret });
+      const session = await pool.query(
+        'SELECT * FROM "AdminRefreshSession" WHERE "id"=$1',
+        [claims.sid],
+      );
+      assert.match(session.rows[0].tokenHash, /^[a-f0-9]{64}$/);
+      assert.ok(
+        !JSON.stringify(session.rows).includes(newCookie.split("=")[1]),
+      );
+      assert.equal(jwt.decode(oldAccess).sid, claims.sid);
+    });
+    test("allows independent panel logins, atomic refresh and immediate logout revocation", async () => {
+      const other = await request(
+        "/auth/login",
+        "POST",
+        { username: "test-operator", password },
+        false,
+      );
+      assert.equal(other.status, 201);
+      assert.equal((await request("/auth/me")).status, 200);
+      const otherCookie = other.headers.get("set-cookie").split(";")[0];
+      const responses = await Promise.all(
+        [1, 2].map(() =>
+          fetch(base + "/auth/refresh", {
+            method: "POST",
+            headers: { Origin: origin, Cookie: otherCookie },
+          }),
+        ),
+      );
+      assert.deepEqual(responses.map((r) => r.status).sort(), [201, 401]);
+      const winner = responses.find((r) => r.status === 201);
+      const nextCookie = winner.headers.get("set-cookie").split(";")[0];
+      const nextTokens = await winner.json();
+      const logout = await fetch(base + "/auth/logout", {
+        method: "POST",
+        headers: { Origin: origin, Cookie: nextCookie },
+      });
+      assert.equal(logout.status, 201);
+      const denied = await fetch(base + "/auth/me", {
+        headers: { Authorization: `Bearer ${nextTokens.access_token}` },
+      });
+      assert.equal(denied.status, 401);
+      const deniedRefresh = await fetch(base + "/auth/refresh", {
+        method: "POST",
+        headers: { Origin: origin, Cookie: nextCookie },
+      });
+      assert.equal(deniedRefresh.status, 401);
+      assert.equal((await request("/auth/me")).status, 200);
+      assert.equal(
+        (
+          await request(
+            "/auth/refresh",
+            "POST",
+            undefined,
+            true,
+            "https://other.example",
+          )
+        ).status,
+        403,
+      );
+    });
+    test("rejects an expired refresh session even with a valid signed refresh JWT", async () => {
+      const other = await request(
+        "/auth/login",
+        "POST",
+        { username: "test-operator", password },
+        false,
+      );
+      const sid = jwt.decode(other.data.access_token).sid;
+      await pool.query(
+        'UPDATE "AdminRefreshSession" SET "expiresAt"=NOW() - INTERVAL \'1 second\' WHERE "id"=$1',
+        [sid],
+      );
+      const denied = await fetch(base + "/auth/refresh", {
+        method: "POST",
+        headers: {
+          Origin: origin,
+          Cookie: other.headers.get("set-cookie").split(";")[0],
+        },
+      });
+      assert.equal(denied.status, 401);
     });
     test("a new stopped installation makes no upstream requests", async () => {
       const summary = await request("/monitor/summary");

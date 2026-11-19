@@ -49,6 +49,10 @@ class SafeErrors implements ExceptionFilter {
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.use((_request: Request, response: Response, next: () => void) => {
+    response.setHeader("Cache-Control", "no-store");
+    next();
+  });
   app.use(helmet({ contentSecurityPolicy: false }));
   const audit = app.get(Audit);
   app.use((request: Request, response: Response, next: () => void) => {
@@ -114,7 +118,8 @@ async function bootstrap() {
       new DocumentBuilder()
         .setTitle("Bilcode Monitoring API")
         .setVersion("1.0")
-        .addCookieAuth("monitor_session")
+        .addBearerAuth()
+        .addCookieAuth("monitor_refresh")
         .build(),
     );
     SwaggerModule.setup("api/docs", app, document);

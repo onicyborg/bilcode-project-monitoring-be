@@ -2,18 +2,19 @@
   "name": "@bilcode/api",
   "private": true,
   "scripts": {
-    "dev": "npm run build && concurrently -k -n TSC,API \"tsc --watch --preserveWatchOutput\" \"node --watch dist/main.js\"",
+    "dev": "pnpm run build && concurrently -k -n TSC,API \"tsc --watch --preserveWatchOutput\" \"node --watch dist/main.js\"",
     "build": "prisma generate && tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
-    "test": "npm run build && node --test --test-concurrency=1 test/integration.test.mjs",
+    "test": "pnpm run build && node --test --test-concurrency=1 test/integration.test.mjs",
     "setup": "node scripts/setup.mjs",
     "format": "prettier --write \"src/*.ts\" \"test/*.mjs\" \"scripts/*.mjs\""
   },
   "dependencies": {
     "@nestjs/common": "11.2.11",
     "@nestjs/core": "11.2.11",
+    "@nestjs/jwt": "^11.0.2",
     "@nestjs/platform-express": "11.2.11",
     "@nestjs/swagger": "^11.2.0",
     "@nestjs/throttler": "^6.4.0",
@@ -23,22 +24,34 @@
     "class-validator": "^0.14.2",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.0",
+    "express": "^5.2.1",
     "helmet": "^8.1.0",
     "pg": "^8.16.3",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
-    "concurrently": "^9.2.5",
-    "prettier": "^3.6.2",
     "@types/cookie-parser": "^1.4.9",
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.15.0",
+    "concurrently": "^9.2.5",
+    "prettier": "^3.6.2",
     "prisma": "^7.10.1",
     "typescript": "^5.9.0"
   },
   "engines": {
     "node": ">=24.0"
+  },
+  "packageManager": "pnpm@10.33.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/engines",
+      "prisma",
+      "@prisma/client"
+    ],
+    "ignoredBuiltDependencies": [
+      "@scarf/scarf"
+    ]
   }
 }
