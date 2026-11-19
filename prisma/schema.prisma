@@ -1,0 +1,92 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model AdminSession {
+  tokenHash String   @id
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+model Configuration {
+  id                    String  @id @default("main")
+  intervalSeconds       Int     @default(300)
+  phone                 String  @default("6281347890520")
+  gowaUrl               String  @default("https://wa.geats.web.id")
+  gowaUsername          String  @default("geats")
+  gowaPasswordEncrypted String?
+  deviceId              String  @default("personal")
+  authAlerts            Boolean @default(true)
+  updatedAt             DateTime @updatedAt
+}
+
+model BilcodeSession {
+  id                    String    @id @default("main")
+  refreshTokenEncrypted String?
+  authStatus            String    @default("MISSING")
+  importedAt            DateTime?
+  validatedAt           DateTime?
+  refreshedAt           DateTime?
+  lastError             String?
+}
+
+model MonitorState {
+  id              String    @id @default("main")
+  desiredRunning  Boolean   @default(false)
+  lastCheckAt     DateTime?
+  lastSuccessAt   DateTime?
+  nextCheckAt     DateTime?
+  lastError       String?
+  authAlerted     Boolean   @default(false)
+  gowaConnected   Boolean?
+  gowaCheckedAt   DateTime?
+}
+
+model CheckRun {
+  id            String    @id @default(uuid())
+  startedAt     DateTime  @default(now())
+  completedAt   DateTime?
+  status        String    @default("RUNNING")
+  durationMs    Int?
+  available     Int       @default(0)
+  newProjects   Int       @default(0)
+  sent          Int       @default(0)
+  error         String?
+
+  @@index([startedAt(sort: Desc)])
+}
+
+model Notification {
+  id         String    @id @default(uuid())
+  projectKey String    @unique
+  payload    Json
+  parts      Json
+  nextPart   Int       @default(0)
+  status     String    @default("PENDING")
+  attempts   Int       @default(0)
+  lastError  String?
+  createdAt  DateTime  @default(now())
+  sentAt     DateTime?
+
+  @@index([createdAt(sort: Desc)])
+}
+
+model EventLog {
+  id         String   @id @default(uuid())
+  category   String
+  level      String   @default("INFO")
+  action     String
+  message    String
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  @@index([category, createdAt(sort: Desc)])
+}
