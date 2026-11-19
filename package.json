@@ -7,7 +7,9 @@
     "start": "node dist/main.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
-    "test": "node --test --test-concurrency=1 test/integration.test.mjs"
+    "test": "npm run build && node --test --test-concurrency=1 test/integration.test.mjs",
+    "setup": "node scripts/setup.mjs",
+    "format": "prettier --write \"src/*.ts\" \"test/*.mjs\" \"scripts/*.mjs\""
   },
   "dependencies": {
     "@nestjs/common": "11.2.11",
@@ -27,11 +29,16 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "concurrently": "^9.2.5",
+    "prettier": "^3.6.2",
     "@types/cookie-parser": "^1.4.9",
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.15.0",
     "prisma": "^7.10.1",
     "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=24.0"
   }
 }

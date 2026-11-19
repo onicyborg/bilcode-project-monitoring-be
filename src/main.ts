@@ -87,14 +87,12 @@ async function bootstrap() {
         "status" in error &&
         (error.status === 400 || error.status === 413)
       ) {
-        response
-          .status(error.status)
-          .json({
-            message:
-              error.status === 413
-                ? "Body request terlalu besar."
-                : "Body JSON tidak valid.",
-          });
+        response.status(error.status).json({
+          message:
+            error.status === 413
+              ? "Body request terlalu besar."
+              : "Body JSON tidak valid.",
+        });
         return;
       }
       next(error);
@@ -122,7 +120,10 @@ async function bootstrap() {
     SwaggerModule.setup("api/docs", app, document);
   }
   app.enableShutdownHooks();
-  await app.listen(Number(process.env.API_PORT || 4100), "127.0.0.1");
+  await app.listen(
+    Number(process.env.API_PORT || 4100),
+    process.env.API_HOST || "127.0.0.1",
+  );
 }
 void bootstrap().catch(() => {
   console.error(

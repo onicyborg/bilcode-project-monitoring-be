@@ -237,7 +237,7 @@ describe(
       await admin.end();
       const migration = spawnSync(
         process.execPath,
-        ["../node_modules/prisma/build/index.js", "migrate", "deploy"],
+        ["node_modules/prisma/build/index.js", "migrate", "deploy"],
         { env: { ...process.env, DATABASE_URL: testUrl }, encoding: "utf8" },
       );
       assert.equal(migration.status, 0, migration.stderr);
