@@ -102,6 +102,8 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
   private accessToken?: string;
   private lease?: Client;
   private leaseHealthy = false;
+  private pendingOtp?: { email: string; expiresAt: number; attempts: number };
+  private otpRequestedAt = 0;
 
   constructor(
     private readonly db: Database,
@@ -237,6 +239,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
     const token = extractCookie(raw);
     return this.exclusive(async () => {
       await this.stoppedOnly();
+      this.pendingOtp = undefined;
       this.accessToken = undefined;
       await this.db.bilcodeSession.update({
         where: { id: "main" },
@@ -259,6 +262,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
   async removeCookie() {
     return this.exclusive(async () => {
       await this.stoppedOnly();
+      this.pendingOtp = undefined;
       this.accessToken = undefined;
       await this.db.bilcodeSession.update({
         where: { id: "main" },
@@ -276,6 +280,95 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
         "Credential Bilcode dihapus dari penyimpanan.",
       );
       return this.summary();
+    });
+  }
+  async requestOtp(email: string) {
+    return this.exclusive(async () => {
+      await this.stoppedOnly();
+      if (Date.now() - this.otpRequestedAt < 60000)
+        throw new BadRequestException(
+          "Tunggu 60 detik sebelum meminta OTP kembali.",
+        );
+      this.otpRequestedAt = Date.now();
+      this.pendingOtp = undefined;
+      try {
+        await this.upstream.requestEmailOtp(email);
+        this.pendingOtp = {
+          email,
+          expiresAt: Date.now() + 10 * 60000,
+          attempts: 0,
+        };
+        await this.audit.record(
+          "BILCODE_OTP_REQUESTED",
+          "Kode login Bilcode diminta melalui email.",
+        );
+        return {
+          message: "Periksa email untuk kode OTP Bilcode.",
+          retryAfterSeconds: 60,
+        };
+      } catch (error) {
+        await this.audit.record(
+          "BILCODE_OTP_REQUEST_FAILED",
+          "Permintaan OTP Bilcode gagal.",
+          "ERROR",
+        );
+        throw new BadRequestException(
+          error instanceof UpstreamError && error.auth
+            ? "Bilcode menolak permintaan OTP. Periksa email akun dan coba kembali."
+            : "OTP belum dapat dikirim. Tunggu 60 detik lalu coba kembali.",
+        );
+      }
+    });
+  }
+  async verifyOtp(email: string, code: string) {
+    return this.exclusive(async () => {
+      await this.stoppedOnly();
+      const pending = this.pendingOtp;
+      if (
+        !pending ||
+        pending.email !== email ||
+        pending.expiresAt <= Date.now() ||
+        pending.attempts >= 5
+      )
+        throw new BadRequestException(
+          "Permintaan OTP tidak berlaku. Minta kode baru dari panel ini.",
+        );
+      pending.attempts++;
+      let token: string;
+      try {
+        token = await this.upstream.verifyEmailOtp(email, code);
+      } catch {
+        await this.audit.record(
+          "BILCODE_OTP_VERIFY_FAILED",
+          "Verifikasi kode login Bilcode gagal.",
+          "WARNING",
+        );
+        throw new BadRequestException(
+          "Verifikasi OTP gagal. Periksa kode terbaru atau minta kode baru setelah 60 detik.",
+        );
+      }
+      this.pendingOtp = undefined;
+      this.accessToken = undefined;
+      await this.db.bilcodeSession.update({
+        where: { id: "main" },
+        data: {
+          refreshTokenEncrypted: this.secrets.encrypt(token),
+          authStatus: "UNVERIFIED",
+          importedAt: new Date(),
+          validatedAt: null,
+          refreshedAt: null,
+          lastError: null,
+        },
+      });
+      await this.audit.record(
+        "BILCODE_OTP_LOGIN",
+        "Login OTP berhasil. Sesi tersimpan; validasi diperlukan sebelum monitoring dimulai.",
+        "SUCCESS",
+      );
+      return {
+        message:
+          "Sesi Bilcode tersimpan. Jalankan validasi sesi sebelum Mulai.",
+      };
     });
   }
   private async refresh(signal: AbortSignal) {

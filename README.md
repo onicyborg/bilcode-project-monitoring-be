@@ -67,7 +67,7 @@ pnpm audit
 pnpm run format
 ```
 
-`pnpm test` membangun backend kemudian menjalankan 17 skenario integrasi. Database khusus `bilcode_monitoring_integration_test` dibuat ulang; database aplikasi tidak dihapus. API Bilcode/GOWA memakai server tiruan, sehingga pengujian tidak membutuhkan frontend, cookie nyata, atau pengiriman WhatsApp sungguhan.
+`pnpm test` membangun backend kemudian menjalankan 19 skenario integrasi. Database khusus `bilcode_monitoring_integration_test` dibuat ulang; database aplikasi tidak dihapus. API Bilcode/GOWA memakai server tiruan, sehingga pengujian tidak membutuhkan frontend, cookie nyata, atau pengiriman WhatsApp sungguhan.
 
 Dependency dan lockfile sekarang berada pada repo ini. Instalasi serta pengujian backend dapat dilakukan walaupun folder frontend tidak tersedia.
 
@@ -84,3 +84,13 @@ Migrasi JWT mengakhiri sesi panel lama sehingga operator perlu login sekali lagi
 ## GitHub Actions dan VPS
 
 Panduan branch, GitHub Environment secrets, Neon development, serta deployment Docker tersedia di [deploy/README.md](deploy/README.md).
+
+## Login sesi Bilcode melalui email OTP
+
+Operator yang telah login panel dapat menggunakan `POST /api/session/otp/request` dengan `{ "email": "akun@example.com" }`, lalu `POST /api/session/otp/verify` dengan `{ "email": "akun@example.com", "code": "123456" }`. Keduanya dilindungi JWT panel, origin guard, dan rate limit. Monitoring harus dihentikan sebelum meminta atau memverifikasi OTP.
+
+Backend mengikuti endpoint dashboard Bilcode `POST /api/auth/send-otp-email` dan `POST /api/auth/verify-otp-email`. Cookie refresh dari respons verifikasi disimpan terenkripsi dan tidak diteruskan ke browser. Email, OTP, cookie, serta payload respons upstream tidak dicatat ke log. Kegagalan verifikasi tidak menimpa sesi tersimpan.
+
+Permintaan baru dibatasi sekali per 60 detik untuk backend ini; maksimal lima percobaan verifikasi dan umur permintaan lokal sepuluh menit. Bilcode tetap menentukan masa berlaku kode sebenarnya. Permintaan pending disimpan sementara di memori: setelah backend restart minta OTP baru. Setelah login berhasil, lakukan `POST /api/session/validate` sebelum Mulai; login tidak menjalankan worker atau mengirim notifikasi proyek.
+
+Tidak ada variabel environment atau migrasi database baru. Import cookie tetap tersedia sebagai alternatif. Peraturan satu sesi dari Bilcode tetap berlaku: login ini dapat mencabut sesi browser lain. Pengujian integrasi memakai upstream tiruan; uji login akun nyata memerlukan email dan OTP operator.

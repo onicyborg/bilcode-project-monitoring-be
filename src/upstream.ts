@@ -54,6 +54,35 @@ async function call(
 @Injectable()
 export class Upstream {
   constructor(private readonly secrets: Secrets) {}
+  async requestEmailOtp(email: string) {
+    const base = process.env.BILCODE_API_URL || "https://api.bilcode.id/api";
+    await call(`${base}/auth/send-otp-email`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://dashboard.bilcode.id",
+      },
+      body: JSON.stringify({ email }),
+    });
+  }
+  async verifyEmailOtp(email: string, code: string) {
+    const base = process.env.BILCODE_API_URL || "https://api.bilcode.id/api";
+    const { response } = await call(`${base}/auth/verify-otp-email`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://dashboard.bilcode.id",
+      },
+      body: JSON.stringify({ email, code }),
+    });
+    for (const cookie of response.headers.getSetCookie()) {
+      const match = /^bilcode_refresh_token=([^;]+)/.exec(cookie);
+      if (match && /^[^\s;,\r\n]{16,4096}$/.test(match[1])) return match[1];
+    }
+    throw new UpstreamError(
+      "Bilcode tidak memberikan sesi refresh. Coba login kembali.",
+    );
+  }
   async refresh(token: string, signal?: AbortSignal) {
     const base = process.env.BILCODE_API_URL || "https://api.bilcode.id/api";
     const { data, response } = await call(

@@ -171,6 +171,35 @@ describe(
       server = createServer(async (req, res) => {
         mock.calls++;
         const url = new URL(req.url, "http://local");
+        if (
+          ["/api/auth/send-otp-email", "/api/auth/verify-otp-email"].includes(
+            url.pathname,
+          )
+        ) {
+          let raw = "";
+          for await (const chunk of req) raw += chunk;
+          const body = JSON.parse(raw);
+          if (body.email !== "operator@example.com")
+            return json(res, 400, {
+              message: "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
+            });
+          if (url.pathname.endsWith("send-otp-email"))
+            return json(res, 200, { message: "Sent" });
+          if (body.code !== "123456")
+            return json(res, 422, {
+              message: "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
+            });
+          if (mock.noOtpCookie)
+            return json(res, 200, { access_token: mock.access });
+          return json(
+            res,
+            200,
+            { access_token: mock.access },
+            {
+              "set-cookie": `bilcode_refresh_token=${mock.refresh}; Path=/; HttpOnly`,
+            },
+          );
+        }
         if (url.pathname === "/api/auth/refresh") {
           mock.refreshCount++;
           if (
@@ -453,6 +482,181 @@ describe(
         },
       });
       assert.equal(denied.status, 401);
+    });
+    test("email OTP login protects existing sessions, validates inputs, encrypts credentials and never sends projects", async () => {
+      assert.equal(
+        (await request("/session/otp/request", "POST", { email: "invalid" }))
+          .status,
+        400,
+      );
+      assert.equal(
+        (
+          await request(
+            "/session/otp/request",
+            "POST",
+            { email: "operator@example.com" },
+            false,
+          )
+        ).status,
+        401,
+      );
+      assert.equal(
+        (
+          await request("/session/otp/verify", "POST", {
+            email: "operator@example.com",
+            code: "123456",
+          })
+        ).status,
+        400,
+      );
+      await importAndValidate();
+      await request("/monitor/start", "POST");
+      assert.equal(
+        (
+          await request("/session/otp/request", "POST", {
+            email: "operator@example.com",
+          })
+        ).status,
+        409,
+      );
+      await request("/monitor/stop", "POST");
+      const old = (
+        await pool.query('SELECT "refreshTokenEncrypted" FROM "BilcodeSession"')
+      ).rows[0].refreshTokenEncrypted;
+      assert.equal(
+        (
+          await request("/session/otp/request", "POST", {
+            email: "operator@example.com",
+          })
+        ).status,
+        201,
+      );
+      assert.equal(
+        (
+          await request("/session/otp/request", "POST", {
+            email: "operator@example.com",
+          })
+        ).status,
+        400,
+      );
+      assert.equal(
+        (
+          await request("/session/otp/verify", "POST", {
+            email: "another@example.com",
+            code: "123456",
+          })
+        ).status,
+        400,
+      );
+      assert.equal(
+        (
+          await request("/session/otp/verify", "POST", {
+            email: "operator@example.com",
+            code: "000000",
+          })
+        ).status,
+        400,
+      );
+      mock.noOtpCookie = true;
+      assert.equal(
+        (
+          await request("/session/otp/verify", "POST", {
+            email: "operator@example.com",
+            code: "123456",
+          })
+        ).status,
+        400,
+      );
+      assert.equal(
+        (
+          await pool.query(
+            'SELECT "refreshTokenEncrypted" FROM "BilcodeSession"',
+          )
+        ).rows[0].refreshTokenEncrypted,
+        old,
+      );
+      mock.noOtpCookie = false;
+      assert.equal(
+        (
+          await request("/session/otp/verify", "POST", {
+            email: "operator@example.com",
+            code: "123456",
+          })
+        ).status,
+        201,
+      );
+      const saved = (await pool.query('SELECT * FROM "BilcodeSession"'))
+        .rows[0];
+      assert.equal(saved.authStatus, "UNVERIFIED");
+      assert.equal(decrypt(saved.refreshTokenEncrypted), mock.refresh);
+      assert.equal(
+        (
+          await request("/session/otp/verify", "POST", {
+            email: "operator@example.com",
+            code: "123456",
+          })
+        ).status,
+        400,
+      );
+      assert.equal((await request("/monitor/start", "POST")).status, 400);
+      assert.equal((await request("/session/validate", "POST")).status, 201);
+      assert.equal(mock.messages.length, 0);
+      const logs = JSON.stringify(
+        (await pool.query('SELECT * FROM "EventLog"')).rows,
+      );
+      for (const secret of [
+        "operator@example.com",
+        "123456",
+        mock.refresh,
+        "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
+      ])
+        assert.ok(!logs.includes(secret));
+    });
+    test("limits OTP attempts and requires a new request after a backend restart", async () => {
+      await stopApi();
+      await startApi();
+      assert.equal(
+        (
+          await request("/session/otp/request", "POST", {
+            email: "operator@example.com",
+          })
+        ).status,
+        201,
+      );
+      for (let i = 0; i < 5; i++)
+        assert.equal(
+          (
+            await request("/session/otp/verify", "POST", {
+              email: "operator@example.com",
+              code: "000000",
+            })
+          ).status,
+          400,
+        );
+      assert.equal(
+        (
+          await request("/session/otp/verify", "POST", {
+            email: "operator@example.com",
+            code: "123456",
+          })
+        ).status,
+        400,
+      );
+      assert.equal(
+        (await request("/monitor/summary")).data.session.hasCookie,
+        false,
+      );
+      await stopApi();
+      await startApi();
+      assert.equal(
+        (
+          await request("/session/otp/verify", "POST", {
+            email: "operator@example.com",
+            code: "123456",
+          })
+        ).status,
+        400,
+      );
     });
     test("a new stopped installation makes no upstream requests", async () => {
       const summary = await request("/monitor/summary");

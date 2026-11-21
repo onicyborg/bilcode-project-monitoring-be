@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import {
   IsBoolean,
+  IsEmail,
   IsIn,
   IsInt,
   IsOptional,
@@ -24,6 +25,12 @@ export class CookieDto {
   @MinLength(2)
   @MaxLength(100000)
   cookieJson!: string;
+}
+export class RequestOtpDto {
+  @ApiProperty() @IsEmail() @MaxLength(254) email!: string;
+}
+export class VerifyOtpDto extends RequestOtpDto {
+  @ApiProperty() @Matches(/^\d{6}$/) code!: string;
 }
 export class SettingsDto {
   @ApiProperty() @IsInt() @Min(60) @Max(3600) intervalSeconds!: number;
