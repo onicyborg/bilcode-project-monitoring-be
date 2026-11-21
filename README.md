@@ -67,7 +67,7 @@ pnpm audit
 pnpm run format
 ```
 
-`pnpm test` membangun backend kemudian menjalankan 19 skenario integrasi. Database khusus `bilcode_monitoring_integration_test` dibuat ulang; database aplikasi tidak dihapus. API Bilcode/GOWA memakai server tiruan, sehingga pengujian tidak membutuhkan frontend, cookie nyata, atau pengiriman WhatsApp sungguhan.
+`pnpm test` membangun backend kemudian menjalankan skenario integrasi. Database khusus `bilcode_monitoring_integration_test` dibuat ulang; database aplikasi tidak dihapus. API Bilcode/GOWA/Vikey memakai server tiruan, sehingga pengujian tidak membutuhkan frontend, cookie nyata, biaya AI, atau pengiriman WhatsApp sungguhan.
 
 Dependency dan lockfile sekarang berada pada repo ini. Instalasi serta pengujian backend dapat dilakukan walaupun folder frontend tidak tersedia.
 
@@ -84,6 +84,20 @@ Migrasi JWT mengakhiri sesi panel lama sehingga operator perlu login sekali lagi
 ## GitHub Actions dan VPS
 
 Panduan branch, GitHub Environment secrets, Neon development, serta deployment Docker tersedia di [deploy/README.md](deploy/README.md).
+
+## Pengajuan bid dengan satu konfirmasi
+
+Tambahkan `VIKEY_API_KEY` pada environment backend. Untuk deployment, tambahkan ke dalam nilai multiline secret **VPS_ENV**, bukan environment frontend. Model tetap `deepseek/deepseek-v4.1-flash-1017` melalui `https://api.vikey.ai/v1/chat/completions`. Migrasi `20261121090000_bid_automation` menambahkan cache proyek, pengajuan, status sinkronisasi, dan antrean notifikasi; jalankan `pnpm db:migrate` sebelum menjalankan kode baru. Workflow deployment menerapkannya otomatis.
+
+- `GET /api/bids?page=1&limit=10` membaca cache dan riwayat lokal, tanpa menghubungi AI atau mengajukan bid.
+- `POST /api/bids/refresh` menyinkronkan proyek dan seluruh halaman `my-bids`, serta mencoba notifikasi tertunda. Sesi Bilcode harus valid.
+- `POST /api/bids/projects/:id/submit` menerima `{ "confirmed": true, "version": "HASH_DARI_GET_BIDS" }`. Konfirmasi mengizinkan AI menyusun dan langsung mengirim, tanpa tinjau draft. Semuanya memerlukan JWT panel; POST juga memerlukan Origin yang terdaftar.
+
+Sistem memeriksa riwayat bid dan proyek terbaru sebelum analisis, lalu memeriksa ulang proyek sebelum POST. Perubahan lingkup meminta konfirmasi ulang. Proposal AI divalidasi: struktur wajib lengkap, estimasi hari konsisten dan tidak melewati deadline. `proposed_amount` dipaksa **0** mengikuti payload Bilcode yang sudah diuji; fitur ini belum menentukan harga pekerjaan. Judul, deskripsi, deadline, dan teknologi proyek dikirim ke Vikey; cookie, token Bilcode, dan credential GOWA tidak dikirim ke AI.
+
+Status lokal `GENERATING`, `SUBMITTING`, `UNKNOWN`, `CONFIRMED`, dan `FAILED` dibedakan dari status Bilcode seperti `applied`. Kegagalan sebelum pengiriman menjadi FAILED dan memerlukan konfirmasi baru. Setelah POST dimulai, respons hilang atau gagal menjadi UNKNOWN, lalu dicocokkan melalui `my-bids`; POST tidak diulang otomatis. UNIQUE project ID dan lock worker mencegah dua pengajuan oleh service ini. Jangan mengulang manual melalui dashboard Bilcode saat hasil masih UNKNOWN. Backend yang restart memulihkan pengajuan yang terputus secara konservatif.
+
+Saat monitoring aktif, setiap siklus juga membaca semua halaman `my-bids`, termasuk ketika daftar proyek baru kosong. Interval mengikuti konfigurasi monitoring. Bid lama dari pengajuan manual menjadi baseline tanpa notifikasi awal. Perubahan nilai `status` apa pun menghasilkan WhatsApp JSON berisi status lama/baru. Data yang hilang dari daftar tidak dianggap ditolak. Kesalahan autentikasi atau struktur respons tidak mengubah status terakhir. Antrean WhatsApp tersimpan dan dicoba kembali pada siklus/sinkronisasi berikutnya; respons gateway hilang tetap dapat menyebabkan notifikasi duplikat saat retry. Menghentikan monitoring juga menghentikan pengecekan berkala bid dan membatalkan operasi aktif; sinkronisasi/pengajuan manual tetap memerlukan tindakan operator.
 
 ## Login sesi Bilcode melalui email OTP
 

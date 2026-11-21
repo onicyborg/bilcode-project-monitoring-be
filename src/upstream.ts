@@ -6,6 +6,7 @@ export class UpstreamError extends Error {
   constructor(
     message: string,
     readonly auth = false,
+    readonly status?: number,
   ) {
     super(message);
   }
@@ -32,6 +33,7 @@ async function call(
       throw new UpstreamError(
         `HTTP ${response.status}`,
         response.status === 401 || response.status === 403,
+        response.status,
       );
     let data: unknown;
     try {
@@ -140,6 +142,52 @@ export class Upstream {
       items: projects.data as unknown[],
       lastPage: projects.last_page as number,
     };
+  }
+  async bids(accessToken: string, page: number, signal: AbortSignal) {
+    const base = process.env.BILCODE_API_URL || "https://api.bilcode.id/api";
+    const { data } = await call(
+      `${base}/worker/my-bids?page=${page}&per_page=15`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      },
+      signal,
+    );
+    const bids = data.bids;
+    if (
+      !isRecord(bids) ||
+      !Array.isArray(bids.data) ||
+      !Number.isInteger(bids.last_page) ||
+      Number(bids.last_page) < page ||
+      Number(bids.last_page) > 1000
+    )
+      throw new UpstreamError(
+        "Struktur bids.data atau pagination tidak sesuai.",
+      );
+    return { items: bids.data as unknown[], lastPage: Number(bids.last_page) };
+  }
+  async submitBid(
+    accessToken: string,
+    projectId: number,
+    payload: unknown,
+    signal: AbortSignal,
+  ) {
+    const base = process.env.BILCODE_API_URL || "https://api.bilcode.id/api";
+    await call(
+      `${base}/worker/projects/${projectId}/bid`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          Origin: "https://dashboard.bilcode.id",
+        },
+        body: JSON.stringify(payload),
+      },
+      signal,
+    );
   }
   private gowaHeaders(config: Configuration) {
     if (!config.gowaPasswordEncrypted)

@@ -48,6 +48,12 @@ function resetMock() {
     slow: false,
     messages: [],
     calls: 0,
+    bids: [],
+    bidPosts: [],
+    aiCalls: 0,
+    malformedAi: false,
+    ambiguousBid: false,
+    malformedBids: false,
   };
 }
 function json(response, status, body, headers = {}) {
@@ -108,6 +114,8 @@ async function startApi() {
       GOWA_ALLOWED_HOSTS: "127.0.0.1",
       ALLOW_LOCAL_UPSTREAM: "true",
       NODE_ENV: "test",
+      VIKEY_API_KEY: "mock-ai-secret",
+      TEST_VIKEY_URL: `http://127.0.0.1:${upstreamPort}/v1`,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -199,6 +207,94 @@ describe(
               "set-cookie": `bilcode_refresh_token=${mock.refresh}; Path=/; HttpOnly`,
             },
           );
+        }
+        if (url.pathname === "/v1/chat/completions") {
+          mock.aiCalls++;
+          if (mock.slowAi) {
+            const timer = setTimeout(() => json(res, 503, {}), 4000);
+            res.on("close", () => clearTimeout(timer));
+            return;
+          }
+          let raw = "";
+          for await (const chunk of req) raw += chunk;
+          const body = JSON.parse(raw);
+          assert.equal(body.model, "deepseek/deepseek-v4.1-flash-1017");
+          assert.equal(req.headers.authorization, "Bearer mock-ai-secret");
+          assert.ok(!raw.includes(mock.refresh));
+          const proposal = {
+            proposed_amount: 999999,
+            estimated_days: 2,
+            proposal:
+              "Saya siap membantu mengembangkan lingkup yang dijelaskan dan menguji hasilnya.",
+            worker_analysis: {
+              features: ["Landing Page — Profil usaha"],
+              tech_stack: ["React"],
+              estimated_days: 2,
+              technical_notes: "Integrasi mengikuti API yang tersedia.",
+              client_clarifications: "Mohon konfirmasi desain dan konten.",
+              additional_notes: "Tidak termasuk fitur di luar lingkup.",
+            },
+          };
+          return json(res, 200, {
+            choices: [
+              {
+                message: {
+                  content: mock.malformedAi
+                    ? "invalid-json"
+                    : JSON.stringify(proposal),
+                },
+              },
+            ],
+          });
+        }
+        if (url.pathname === "/api/worker/my-bids") {
+          if (
+            mock.authRejected ||
+            req.headers.authorization !== `Bearer ${mock.access}`
+          )
+            return json(res, 401, {});
+          if (mock.malformedBids)
+            return json(res, 200, { bids: { data: [], last_page: "invalid" } });
+          const page = Number(url.searchParams.get("page"));
+          return json(res, 200, {
+            bids: {
+              data: mock.bids.slice((page - 1) * 15, page * 15),
+              last_page: Math.max(1, Math.ceil(mock.bids.length / 15)),
+            },
+          });
+        }
+        const bidMatch = /^\/api\/worker\/projects\/(\d+)\/bid$/.exec(
+          url.pathname,
+        );
+        if (bidMatch) {
+          if (
+            mock.authRejected ||
+            req.headers.authorization !== `Bearer ${mock.access}`
+          )
+            return json(res, 401, {});
+          let raw = "";
+          for await (const chunk of req) raw += chunk;
+          const payload = JSON.parse(raw);
+          mock.bidPosts.push(payload);
+          if (mock.unknownBid) {
+            res.destroy();
+            return;
+          }
+          const project = mock.projects.find(
+            (p) => p.id === Number(bidMatch[1]),
+          );
+          mock.bids.push({
+            id: 310 + mock.bids.length,
+            project_id: Number(bidMatch[1]),
+            status: "applied",
+            project: { id: Number(bidMatch[1]), title: project.title },
+          });
+          project.has_applied = true;
+          if (mock.ambiguousBid) {
+            res.destroy();
+            return;
+          }
+          return json(res, 200, { message: "Success" });
         }
         if (url.pathname === "/api/auth/refresh") {
           mock.refreshCount++;
@@ -316,7 +412,9 @@ describe(
     });
     beforeEach(async () => {
       await request("/monitor/stop", "POST");
-      await pool.query('TRUNCATE "Notification", "CheckRun", "EventLog"');
+      await pool.query(
+        'TRUNCATE "BidStatusEvent", "BidApplication", "BidProject", "BidSyncState", "Notification", "CheckRun", "EventLog"',
+      );
       await pool.query(
         'UPDATE "MonitorState" SET "authAlerted"=false, "lastError"=NULL, "lastCheckAt"=NULL, "lastSuccessAt"=NULL',
       );
@@ -657,6 +755,255 @@ describe(
         ).status,
         400,
       );
+    });
+    const sampleProject = () => ({
+      id: 611,
+      title: "Website UMKM",
+      description: "Landing page dan integrasi chatbot dari tim AI.",
+      status: "published",
+      has_applied: false,
+      deadline: new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10),
+      client_id: 999,
+      lead_source: "private-test-source",
+    });
+    async function prepareBid() {
+      mock.projects = [sampleProject()];
+      await importAndValidate();
+      assert.equal((await request("/bids/refresh", "POST")).status, 201);
+      return (await request("/bids")).data.projects.find(
+        (p) => p.projectId === 611,
+      );
+    }
+    test("bid discovery requires authentication and never generates or submits without confirmation", async () => {
+      const p = await prepareBid();
+      assert.equal(
+        (await request("/bids", "GET", undefined, false)).status,
+        401,
+      );
+      assert.equal(mock.aiCalls, 0);
+      assert.equal(mock.bidPosts.length, 0);
+      assert.equal(
+        (
+          await request("/bids/projects/611/submit", "POST", {
+            version: p.version,
+          })
+        ).status,
+        400,
+      );
+      assert.equal(
+        (
+          await request("/bids/projects/611/submit", "POST", {
+            version: p.version,
+            confirmed: false,
+          })
+        ).status,
+        400,
+      );
+      mock.projects[0].description = "Lingkup baru";
+      assert.equal(
+        (
+          await request("/bids/projects/611/submit", "POST", {
+            version: p.version,
+            confirmed: true,
+          })
+        ).status,
+        409,
+      );
+      assert.equal(mock.aiCalls, 0);
+    });
+    test("one confirmation generates a validated AI proposal and submits only once", async () => {
+      const p = await prepareBid();
+      const result = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(result.status, 201);
+      assert.equal(result.data.state, "CONFIRMED");
+      assert.equal(result.data.status, "applied");
+      assert.equal(mock.aiCalls, 1);
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(mock.bidPosts[0].proposed_amount, 0);
+      assert.equal(
+        mock.bidPosts[0].estimated_days,
+        mock.bidPosts[0].worker_analysis.estimated_days,
+      );
+      assert.equal(
+        (
+          await request("/bids/projects/611/submit", "POST", {
+            version: p.version,
+            confirmed: true,
+          })
+        ).status,
+        409,
+      );
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(mock.messages.length, 1);
+      await request("/bids/refresh", "POST");
+      assert.equal(mock.messages.length, 1);
+      const text = JSON.stringify(
+        (await pool.query('SELECT * FROM "EventLog"')).rows,
+      );
+      assert.ok(!text.includes("mock-ai-secret"));
+      assert.ok(!text.includes("Saya siap membantu"));
+    });
+    test("invalid AI output never sends a bid and requires a fresh explicit confirmation to retry", async () => {
+      const p = await prepareBid();
+      mock.malformedAi = true;
+      const failed = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(failed.data.state, "FAILED");
+      assert.equal(mock.bidPosts.length, 0);
+      mock.malformedAi = false;
+      const success = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(success.data.state, "CONFIRMED");
+      assert.equal(mock.bidPosts.length, 1);
+    });
+    test("a lost bid response reconciles using my-bids without sending another POST", async () => {
+      const p = await prepareBid();
+      mock.ambiguousBid = true;
+      const result = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(result.data.state, "CONFIRMED");
+      assert.equal(mock.bidPosts.length, 1);
+      await stopApi();
+      await startApi();
+      await request("/bids/refresh", "POST");
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(
+        (await request("/bids")).data.applications[0].status,
+        "applied",
+      );
+    });
+    test("existing manual bids are baselined across every page and status notifications survive gateway failure and restart", async () => {
+      await importAndValidate();
+      mock.bids = Array.from({ length: 16 }, (_, i) => ({
+        id: 100 + i,
+        project_id: 1000 + i,
+        status: "applied",
+        project: { title: "Manual " + i },
+      }));
+      assert.equal((await request("/bids/refresh", "POST")).status, 201);
+      assert.equal((await request("/bids")).data.applicationTotal, 16);
+      assert.equal(mock.messages.length, 0);
+      mock.bids[15].status = "accepted";
+      mock.failGowa = true;
+      assert.equal((await request("/bids/refresh", "POST")).status, 201);
+      assert.equal(
+        (
+          await pool.query(
+            'SELECT count(*)::int AS n FROM "BidStatusEvent" WHERE "sentAt" IS NULL',
+          )
+        ).rows[0].n,
+        1,
+      );
+      await stopApi();
+      await startApi();
+      mock.failGowa = false;
+      await request("/bids/refresh", "POST");
+      assert.equal(mock.messages.length, 1);
+      assert.ok(mock.messages[0].message.includes("accepted"));
+      assert.ok(mock.messages[0].message.includes("applied"));
+      await request("/bids/refresh", "POST");
+      assert.equal(mock.messages.length, 1);
+      mock.bids = [];
+      await request("/bids/refresh", "POST");
+      assert.equal((await request("/bids")).data.applicationTotal, 16);
+      assert.equal(mock.messages.length, 1);
+    });
+    test("an unresolved POST stays blocked across restart until my-bids confirms it", async () => {
+      const p = await prepareBid();
+      mock.unknownBid = true;
+      const result = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(result.data.state, "UNKNOWN");
+      await stopApi();
+      await startApi();
+      const retry = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(retry.status, 409);
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(mock.aiCalls, 1);
+      mock.bids = [
+        {
+          id: 310,
+          project_id: 611,
+          status: "applied",
+          project: { title: "Website UMKM" },
+        },
+      ];
+      await request("/bids/refresh", "POST");
+      assert.equal(
+        (await request("/bids")).data.applications[0].state,
+        "CONFIRMED",
+      );
+      assert.equal(mock.bidPosts.length, 1);
+    });
+    test("stop cancels AI generation before any bid POST", async () => {
+      const p = await prepareBid();
+      mock.slowAi = true;
+      const submission = request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      await waitFor(() => mock.aiCalls === 1, "AI not started");
+      await request("/monitor/stop", "POST");
+      assert.equal((await submission).data.state, "FAILED");
+      assert.equal(mock.bidPosts.length, 0);
+      assert.equal(
+        (await request("/monitor/summary")).data.state.desiredRunning,
+        false,
+      );
+    });
+    test("monitoring checks bid changes even when no new projects exist", async () => {
+      await importAndValidate();
+      mock.bids = [
+        {
+          id: 310,
+          project_id: 611,
+          status: "applied",
+          project: { title: "Website UMKM" },
+        },
+      ];
+      await request("/bids/refresh", "POST");
+      mock.bids[0].status = "rejected";
+      assert.equal((await request("/monitor/start", "POST")).status, 201);
+      await waitFor(
+        () => mock.messages.length === 1,
+        "No bid status notification",
+      );
+      await request("/monitor/stop", "POST");
+      assert.ok(mock.messages[0].message.includes("rejected"));
+      assert.equal(mock.aiCalls, 0);
+      assert.equal(mock.bidPosts.length, 0);
+    });
+    test("malformed bid listings preserve the last known status and do not produce a change notification", async () => {
+      await importAndValidate();
+      mock.bids = [
+        {
+          id: 1,
+          project_id: 611,
+          status: "applied",
+          project: { title: "Website" },
+        },
+      ];
+      await request("/bids/refresh", "POST");
+      mock.malformedBids = true;
+      assert.equal((await request("/bids/refresh", "POST")).status, 400);
+      const d = (await request("/bids")).data;
+      assert.equal(d.applications[0].status, "applied");
+      assert.ok(d.sync.lastError);
+      assert.equal(mock.messages.length, 0);
     });
     test("a new stopped installation makes no upstream requests", async () => {
       const summary = await request("/monitor/summary");

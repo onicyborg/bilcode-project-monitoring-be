@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  ParseIntPipe,
   Post,
   Put,
   Query,
@@ -33,6 +34,32 @@ import {
   VerifyOtpDto,
 } from "./dto";
 import { Monitor } from "./monitor";
+import { Bids } from "./bids";
+import { SubmitBidDto } from "./dto";
+
+@ApiTags("Bids")
+@ApiBearerAuth()
+@UseGuards(AdminGuard)
+@Controller("bids")
+export class BidsController {
+  constructor(
+    private readonly bids: Bids,
+    private readonly monitor: Monitor,
+  ) {}
+  @Get() dashboard(@Query() query: PageDto) {
+    return this.bids.dashboard(query.page, query.limit);
+  }
+  @Post("refresh") refresh() {
+    return this.monitor.refreshBidDashboard();
+  }
+  @Post("projects/:id/submit")
+  @Throttle({
+    default: { limit: process.env.NODE_ENV === "test" ? 2000 : 5, ttl: 60000 },
+  })
+  submit(@Param("id", ParseIntPipe) id: number, @Body() body: SubmitBidDto) {
+    return this.monitor.submitBid(id, body.version);
+  }
+}
 
 @ApiTags("Authentication")
 @Controller("auth")
