@@ -7,6 +7,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { Client } from "pg";
+import { Bids } from "./bids";
 import { createHash } from "node:crypto";
 import { Database } from "./database";
 import { Secrets } from "./secrets";
@@ -21,9 +22,19 @@ export function jsonMessages(project: unknown) {
   const pieces: string[] = [];
   for (let i = 0; i < characters.length; i += 3500)
     pieces.push(characters.slice(i, i + 3500).join(""));
+  const id =
+    isRecord(project) && Number.isSafeInteger(project.id)
+      ? Number(project.id)
+      : null;
+  const origin = (process.env.APP_ORIGIN || "http://localhost:3100").split(
+    ",",
+  )[0];
+  const link = id
+    ? `\nBuka proyek & konfirmasi penawaran: ${origin}/bids?project=${id}`
+    : "";
   return pieces.map(
     (piece, i) =>
-      `Proyek Bilcode baru${pieces.length > 1 ? ` (${i + 1}/${pieces.length})` : ""}\n\`\`\`\n${piece}\n\`\`\``,
+      `Proyek Bilcode baru${pieces.length > 1 ? ` (${i + 1}/${pieces.length})` : ""}\n\`\`\`\n${piece}\n\`\`\`${i === pieces.length - 1 ? link : ""}`,
   );
 }
 
@@ -110,6 +121,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
     private readonly secrets: Secrets,
     private readonly upstream: Upstream,
     private readonly audit: Audit,
+    private readonly bids: Bids,
   ) {}
 
   async onModuleInit() {
@@ -129,6 +141,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
         "Another monitoring backend is already using this database",
       );
     this.leaseHealthy = true;
+    await this.bids.recover();
     this.lease.on("error", () => {
       this.leaseHealthy = false;
       this.pauseRequested = true;
@@ -234,6 +247,94 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
       statistics: { checks24h: checks, notificationsSent: notifications },
       latestChecks,
     };
+  }
+  private async authorized<T>(
+    request: (token: string) => Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    if (!this.accessToken) await this.refresh(signal);
+    try {
+      return await request(this.accessToken!);
+    } catch (error) {
+      if (!(error instanceof UpstreamError) || !error.auth || signal.aborted)
+        throw error;
+      await this.refresh(signal);
+      return request(this.accessToken!);
+    }
+  }
+  async refreshBidDashboard() {
+    return this.bidOperation(async (signal) => {
+      await this.bids.rememberProjects(await this.fetchProjects(signal));
+      await this.bids.sync(
+        (request) => this.authorized(request, signal),
+        signal,
+      );
+      const config = await this.db.configuration.findUniqueOrThrow({
+        where: { id: "main" },
+      });
+      await this.bids.notify(config, signal);
+      return { message: "Proyek dan status bid diperbarui." };
+    });
+  }
+  async submitBid(projectId: number, version: string) {
+    return this.bidOperation(async (signal) => {
+      const result = await this.bids.submit(
+        projectId,
+        version,
+        (request) => this.authorized(request, signal),
+        async () => {
+          await this.bids.rememberProjects(await this.fetchProjects(signal));
+        },
+        signal,
+      );
+      const config = await this.db.configuration.findUniqueOrThrow({
+        where: { id: "main" },
+      });
+      await this.bids.notify(config, signal);
+      return result;
+    });
+  }
+  private async bidOperation<T>(work: (signal: AbortSignal) => Promise<T>) {
+    if (this.busy || this.inFlight)
+      throw new ConflictException(
+        "Pengecekan atau pengajuan lain sedang berjalan. Coba sebentar lagi.",
+      );
+    return this.exclusive(async () => {
+      this.assertLease();
+      const session = await this.db.bilcodeSession.findUniqueOrThrow({
+        where: { id: "main" },
+      });
+      if (session.authStatus !== "VALID")
+        throw new BadRequestException("Validasi sesi Bilcode terlebih dahulu.");
+      this.busy = true;
+      this.controller = new AbortController();
+      try {
+        return await work(this.controller.signal);
+      } catch (error) {
+        if (
+          error instanceof BadRequestException ||
+          error instanceof ConflictException
+        )
+          throw error;
+        if (error instanceof UpstreamError && error.auth) {
+          this.accessToken = undefined;
+          await this.db.bilcodeSession.update({
+            where: { id: "main" },
+            data: {
+              authStatus: "INVALID",
+              lastError: "Sesi Bilcode ditolak saat memproses bid.",
+            },
+          });
+        }
+        await this.bids.syncFailure();
+        throw new BadRequestException(
+          "Operasi bid belum selesai. Periksa status pengajuan dan sesi sebelum mencoba kembali.",
+        );
+      } finally {
+        this.busy = false;
+        this.controller = undefined;
+      }
+    });
   }
   async importCookie(raw: string) {
     const token = extractCookie(raw);
@@ -623,7 +724,19 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
     let newProjects = 0;
     let sent = 0;
     try {
+      try {
+        await this.bids.sync(
+          (request) => this.authorized(request, signal),
+          signal,
+        );
+      } catch (error) {
+        if (signal.aborted || (error instanceof UpstreamError && error.auth))
+          throw error;
+        await this.bids.syncFailure();
+      }
+      await this.bids.notify(config, signal);
       const projects = await this.fetchProjects(signal);
+      await this.bids.rememberProjects(projects);
       available = projects.length;
       await this.authNotification(config, true, signal);
       for (const project of projects) {

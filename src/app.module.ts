@@ -7,6 +7,7 @@ import { Secrets } from "./secrets";
 import { Audit } from "./audit";
 import { Upstream } from "./upstream";
 import { Monitor } from "./monitor";
+import { Bids } from "./bids";
 import {
   AuthController,
   HealthController,
@@ -14,6 +15,7 @@ import {
   MonitorController,
   SessionController,
   SettingsController,
+  BidsController,
 } from "./controllers";
 
 @Module({
@@ -29,6 +31,7 @@ import {
     MonitorController,
     SessionController,
     SettingsController,
+    BidsController,
   ],
   providers: [
     Database,
@@ -36,6 +39,7 @@ import {
     Audit,
     Upstream,
     Monitor,
+    Bids,
     AdminAuth,
     AdminGuard,
     { provide: APP_GUARD, useClass: OriginGuard },

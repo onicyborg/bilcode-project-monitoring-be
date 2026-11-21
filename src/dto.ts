@@ -19,6 +19,10 @@ export class LoginDto {
   @ApiProperty() @IsString() @MaxLength(80) username!: string;
   @ApiProperty() @IsString() @MinLength(1) @MaxLength(256) password!: string;
 }
+export class SubmitBidDto {
+  @ApiProperty() @IsBoolean() @IsIn([true]) confirmed!: boolean;
+  @ApiProperty() @Matches(/^[a-f0-9]{64}$/) version!: string;
+}
 export class CookieDto {
   @ApiProperty({ description: "JSON export cookie, tidak dicatat pada log." })
   @IsString()

@@ -93,3 +93,50 @@ model EventLog {
 
   @@index([category, createdAt(sort: Desc)])
 }
+
+model BidProject {
+  projectId  Int      @id
+  title      String
+  payload    Json
+  available  Boolean  @default(true)
+  hasApplied Boolean  @default(false)
+  observedAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model BidApplication {
+  id              String           @id @default(uuid())
+  projectId       Int              @unique
+  title           String
+  upstreamId      Int?             @unique
+  state           String
+  status          String?
+  proposalPayload Json?
+  lastError       String?
+  confirmedAt     DateTime?
+  lastSyncedAt    DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  events          BidStatusEvent[]
+}
+
+model BidStatusEvent {
+  id             String         @id @default(uuid())
+  applicationId  String
+  application    BidApplication @relation(fields: [applicationId], references: [id])
+  previousStatus String?
+  nextStatus     String
+  parts          Json
+  nextPart       Int            @default(0)
+  sentAt         DateTime?
+  lastError      String?
+  createdAt      DateTime       @default(now())
+
+  @@index([sentAt, createdAt])
+}
+
+model BidSyncState {
+  id           String    @id @default("main")
+  lastSyncedAt DateTime?
+  lastError    String?
+}
