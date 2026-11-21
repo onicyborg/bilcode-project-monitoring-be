@@ -23,7 +23,15 @@ import {
 } from "./auth";
 import { Audit } from "./audit";
 import { Database } from "./database";
-import { CookieDto, LoginDto, LogQueryDto, PageDto, SettingsDto } from "./dto";
+import {
+  CookieDto,
+  LoginDto,
+  LogQueryDto,
+  PageDto,
+  SettingsDto,
+  RequestOtpDto,
+  VerifyOtpDto,
+} from "./dto";
 import { Monitor } from "./monitor";
 
 @ApiTags("Authentication")
@@ -122,6 +130,16 @@ export class MonitorController {
 @Controller("session")
 export class SessionController {
   constructor(private readonly monitor: Monitor) {}
+  @Post("otp/request")
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  requestOtp(@Body() body: RequestOtpDto) {
+    return this.monitor.requestOtp(body.email);
+  }
+  @Post("otp/verify")
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  verifyOtp(@Body() body: VerifyOtpDto) {
+    return this.monitor.verifyOtp(body.email, body.code);
+  }
   @Put("cookie") import(@Body() body: CookieDto) {
     return this.monitor.importCookie(body.cookieJson);
   }
