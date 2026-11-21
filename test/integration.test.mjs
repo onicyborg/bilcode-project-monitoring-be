@@ -219,6 +219,21 @@ describe(
           for await (const chunk of req) raw += chunk;
           const body = JSON.parse(raw);
           assert.equal(body.model, "deepseek/deepseek-v4.1-flash-1017");
+          assert.equal(body.messages.length, 2);
+          assert.equal(body.messages[0].role, "system");
+          assert.match(
+            body.messages[0].content,
+            /Humanizer-zh, adaptasi bahasa Indonesia/,
+          );
+          assert.match(
+            body.messages[0].content,
+            /Kontrak JSON.*lebih tinggi daripada aturan gaya/,
+          );
+          assert.match(
+            body.messages[0].content,
+            /Pertahankan setiap kebutuhan yang berbeda/,
+          );
+          assert.equal(body.messages[1].role, "user");
           assert.equal(req.headers.authorization, "Bearer mock-ai-secret");
           assert.ok(!raw.includes(mock.refresh));
           const proposal = {

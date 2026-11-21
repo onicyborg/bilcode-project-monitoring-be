@@ -87,6 +87,8 @@ Panduan branch, GitHub Environment secrets, Neon development, serta deployment D
 
 ## Pengajuan bid dengan satu konfirmasi
 
+Generator menyertakan [panduan Humanizer-zh yang diadaptasi ke bahasa Indonesia](docs/humanizer-zh/README.md) untuk menyunting gaya sebelum JSON akhir dikembalikan. Panduan mengurangi pengulangan dan ungkapan template sambil mempertahankan lingkup, syarat, dan fakta. Tetap satu panggilan model; tidak ada jaminan lolos detektor AI. Tidak perlu environment tambahan.
+
 Tambahkan `VIKEY_API_KEY` pada environment backend. Untuk deployment, tambahkan ke dalam nilai multiline secret **VPS_ENV**, bukan environment frontend. Model tetap `deepseek/deepseek-v4.1-flash-1017` melalui `https://api.vikey.ai/v1/chat/completions`. Migrasi `20261121090000_bid_automation` menambahkan cache proyek, pengajuan, status sinkronisasi, dan antrean notifikasi; jalankan `pnpm db:migrate` sebelum menjalankan kode baru. Workflow deployment menerapkannya otomatis.
 
 - `GET /api/bids?page=1&limit=10` membaca cache dan riwayat lokal, tanpa menghubungi AI atau mengajukan bid.

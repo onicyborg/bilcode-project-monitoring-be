@@ -20,6 +20,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/prisma.config.ts /app/package.json /app/pnpm-lock.yaml ./
+COPY docs/humanizer-zh/LICENSE ./licenses/humanizer-zh/LICENSE
 USER node
 EXPOSE 4100
 CMD ["node", "dist/main.js"]
