@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { Configuration } from "./generated/prisma/client";
 import { Secrets } from "./secrets";
+import { bidField, safeResponse, SafeResponse } from "./bid-response";
 
 export class UpstreamError extends Error {
   constructor(
@@ -9,6 +10,7 @@ export class UpstreamError extends Error {
     readonly status?: number,
     readonly code?: string,
     readonly fields: string[] = [],
+    readonly response?: SafeResponse,
   ) {
     super(message);
   }
@@ -45,11 +47,13 @@ async function call(
     if (!response.ok) {
       let code: string | undefined;
       let fields: string[] = [];
+      let details: SafeResponse = {};
       if (response.headers.get("cf-mitigated") === "challenge")
         code = "CF_CHALLENGE";
       else {
         // Keep only an explicit machine code; upstream bodies may contain credentials or project text.
         const body: unknown = await response.json().catch(() => null);
+        details = safeResponse(body, options);
         const candidate = isRecord(body)
           ? (body.code ?? body.error_code)
           : null;
@@ -58,14 +62,17 @@ async function call(
           /^[A-Z][A-Z0-9_]{1,63}$/.test(candidate)
         )
           code = candidate;
+        if (
+          response.status === 403 &&
+          isRecord(body) &&
+          typeof body.message === "string" &&
+          /^Bidang keahlian Anda tidak sesuai dengan kebutuhan proyek ini \([^()\r\n]{1,160}\)\.$/u.test(
+            body.message,
+          )
+        )
+          code = "BID_SKILL_MISMATCH";
         if (isRecord(body) && isRecord(body.errors)) {
-          fields = Object.keys(body.errors)
-            .filter((field) =>
-              /^(proposed_amount|estimated_days|proposal|worker_analysis(?:\.(?:features|tech_stack|estimated_days|technical_notes|client_clarifications|additional_notes)(?:\.\d{1,3})?)?)$/.test(
-                field,
-              ),
-            )
-            .slice(0, 20);
+          fields = Object.keys(body.errors).filter(bidField).slice(0, 20);
         }
       }
       throw new UpstreamError(
@@ -74,6 +81,7 @@ async function call(
         response.status,
         code,
         fields,
+        details,
       );
     }
     let data: unknown;
@@ -240,20 +248,22 @@ export class Upstream {
     signal: AbortSignal,
   ) {
     const base = process.env.BILCODE_API_URL || "https://api.bilcode.id/api";
-    await call(
-      `${base}/worker/projects/${projectId}/bid`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          Origin: "https://dashboard.bilcode.id",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(payload),
+    const options: RequestInit = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Origin: "https://dashboard.bilcode.id",
+        Accept: "application/json",
       },
+      body: JSON.stringify(payload),
+    };
+    const { data, response } = await call(
+      `${base}/worker/projects/${projectId}/bid`,
+      options,
       signal,
     );
+    return { status: response.status, response: safeResponse(data, options) };
   }
   private gowaHeaders(config: Configuration) {
     if (!config.gowaPasswordEncrypted)

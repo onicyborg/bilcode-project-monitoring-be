@@ -118,6 +118,24 @@ model BidApplication {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   events          BidStatusEvent[]
+  attempts        BidAttempt[]
+}
+
+model BidAttempt {
+  id             String         @id @default(uuid())
+  applicationId  String
+  application    BidApplication @relation(fields: [applicationId], references: [id])
+  outcome        String
+  phase          String
+  httpStatus     Int?
+  postHttpStatus Int?
+  code           String?
+  message        String
+  action         String
+  response       Json?
+  createdAt      DateTime       @default(now())
+
+  @@index([applicationId, createdAt])
 }
 
 model BidStatusEvent {

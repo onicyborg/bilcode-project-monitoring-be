@@ -52,6 +52,12 @@ export class BidsController {
   @Post("refresh") refresh() {
     return this.monitor.refreshBidDashboard();
   }
+  @Get("projects/:id/attempts") attempts(
+    @Param("id", ParseIntPipe) id: number,
+    @Query() query: PageDto,
+  ) {
+    return this.bids.attempts(id, query.page, query.limit);
+  }
   @Post("projects/:id/submit")
   @Throttle({
     default: { limit: process.env.NODE_ENV === "test" ? 2000 : 5, ttl: 60000 },

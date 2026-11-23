@@ -14,6 +14,7 @@ import {
 } from "./upstream";
 import { Configuration, Prisma } from "./generated/prisma/client";
 import { proposalStyle } from "./proposal-style";
+import { bidAction, safeResponse } from "./bid-response";
 
 type Authorized = <T>(request: (token: string) => Promise<T>) => Promise<T>;
 const model = "deepseek/deepseek-v4.1-flash-1017";
@@ -182,7 +183,14 @@ export class Bids {
           orderBy: { updatedAt: "desc" },
           skip: (page - 1) * limit,
           take: limit,
-          include: { events: { orderBy: { createdAt: "desc" }, take: 5 } },
+          include: {
+            events: { orderBy: { createdAt: "desc" }, take: 5 },
+            attempts: {
+              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+              take: 1,
+            },
+            _count: { select: { attempts: true } },
+          },
         }),
         this.db.bidApplication.count(),
         this.db.bidSyncState.findUnique({ where: { id: "main" } }),
@@ -211,6 +219,19 @@ export class Bids {
       model,
       proposedAmount: 0,
     };
+  }
+  async attempts(projectId: number, page: number, limit: number) {
+    const where = { application: { projectId } };
+    const [items, total] = await Promise.all([
+      this.db.bidAttempt.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.db.bidAttempt.count({ where }),
+    ]);
+    return { items, total, page, pages: Math.max(1, Math.ceil(total / limit)) };
   }
   private async generate(
     payload: Record<string, unknown>,
@@ -256,7 +277,19 @@ export class Bids {
         ],
       }),
     });
-    if (!response.ok) throw new Error("AI upstream failed");
+    if (!response.ok) {
+      const body: unknown = await response.json().catch(() => null);
+      throw new UpstreamError(
+        "AI upstream failed",
+        false,
+        response.status,
+        "AI_REQUEST_FAILED",
+        [],
+        safeResponse(body, {
+          headers: { Authorization: `Bearer ${process.env.VIKEY_API_KEY}` },
+        }),
+      );
+    }
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
     if (typeof content !== "string" || content.length > 40000)
@@ -412,6 +445,40 @@ export class Bids {
       }
     }
   }
+  private async precheckFailure(projectId: number, error: unknown) {
+    if (!(error instanceof UpstreamError)) return;
+    const cached = await this.db.bidProject.findUnique({
+      where: { projectId },
+    });
+    const previous = await this.db.bidApplication.findUnique({
+      where: { projectId },
+    });
+    if (!cached || (previous && previous.state !== "FAILED")) return;
+    const lastError = `Pemeriksaan sebelum pengajuan gagal. Proposal belum dikirim. ${upstreamDiagnostic(error)}`;
+    const app = await this.db.bidApplication.upsert({
+      where: { projectId },
+      create: {
+        projectId,
+        title: cached.title,
+        state: "FAILED",
+        lastError,
+        confirmedAt: new Date(),
+      },
+      update: { lastError, confirmedAt: new Date() },
+    });
+    await this.db.bidAttempt.create({
+      data: {
+        applicationId: app.id,
+        outcome: "FAILED",
+        phase: "PRECHECK",
+        httpStatus: error.status,
+        code: error.code,
+        message: error.response?.message || lastError,
+        action: bidAction("FAILED", "PRECHECK", error.status, error.code),
+        response: json(error.response || {}),
+      },
+    });
+  }
   async submit(
     projectId: number,
     version: string,
@@ -421,7 +488,12 @@ export class Bids {
   ) {
     if (!process.env.VIKEY_API_KEY)
       throw new BadRequestException("VIKEY_API_KEY belum diatur pada backend.");
-    await this.sync(authorized, signal);
+    try {
+      await this.sync(authorized, signal);
+    } catch (error) {
+      await this.precheckFailure(projectId, error);
+      throw error;
+    }
     const existing = await this.db.bidApplication.findUnique({
       where: { projectId },
     });
@@ -429,7 +501,12 @@ export class Bids {
       throw new ConflictException(
         "Proyek sudah diajukan atau hasil pengajuan masih diperiksa. Bid tidak dikirim ulang.",
       );
-    await refreshProjects();
+    try {
+      await refreshProjects();
+    } catch (error) {
+      await this.precheckFailure(projectId, error);
+      throw error;
+    }
     const project = await this.db.bidProject.findUnique({
       where: { projectId },
     });
@@ -453,6 +530,8 @@ export class Bids {
     });
     let sending = false;
     let phase = "AI";
+    let failure: unknown;
+    let receipt: Awaited<ReturnType<Upstream["submitBid"]>> | undefined;
     try {
       await this.audit.record(
         "BID_CONFIRMED",
@@ -481,7 +560,7 @@ export class Bids {
       });
       sending = true;
       phase = "POST_BID";
-      await authorized((token) =>
+      receipt = await authorized((token) =>
         this.upstream.submitBid(token, projectId, proposal, signal),
       );
       await this.db.bidApplication.update({
@@ -494,17 +573,22 @@ export class Bids {
       phase = "RECONCILE";
       await this.sync(authorized, signal);
     } catch (error) {
+      failure = error;
       const rejected =
         phase === "POST_BID" &&
         error instanceof UpstreamError &&
         [400, 401, 403, 404, 405, 410, 422].includes(error.status || 0);
       const detail = `Proyek #${projectId} · ${phase} · ${upstreamDiagnostic(error)}`;
+      const rejection =
+        error instanceof UpstreamError && error.code === "BID_SKILL_MISMATCH"
+          ? "Bidang keahlian akun Bilcode tidak sesuai dengan kebutuhan proyek. Periksa bidang di profil Bilcode sebelum mengajukan kembali."
+          : "Bilcode menolak pengajuan.";
       await this.db.bidApplication.update({
         where: { id: app.id },
         data: {
           state: sending && !rejected ? "UNKNOWN" : "FAILED",
           lastError: rejected
-            ? `Bilcode menolak pengajuan. ${detail}. Proposal tersimpan lokal, bukan bukti bid terkirim.`
+            ? `${rejection} ${detail}. Proposal tersimpan lokal, bukan bukti bid terkirim.`
             : `${
                 sending
                   ? "Hasil pengiriman belum pasti. Sistem akan memeriksa my-bids; pengajuan tidak diulang otomatis."
@@ -534,8 +618,44 @@ export class Bids {
           await this.syncFailure(syncError);
         }
       }
-      if (error instanceof UpstreamError && error.auth) throw error;
     }
-    return this.db.bidApplication.findUniqueOrThrow({ where: { id: app.id } });
+    const result = await this.db.bidApplication.findUniqueOrThrow({
+      where: { id: app.id },
+    });
+    const upstreamFailure =
+      failure instanceof UpstreamError ? failure : undefined;
+    const outcome = result.state;
+    const finalPhase = failure ? phase : "POST_BID";
+    const resultCode =
+      upstreamFailure?.code ||
+      (signal.aborted ? "OPERATION_CANCELLED" : undefined);
+    await this.db.bidAttempt.create({
+      data: {
+        applicationId: app.id,
+        outcome,
+        phase: finalPhase,
+        httpStatus:
+          upstreamFailure?.status ?? (failure ? null : receipt?.status),
+        postHttpStatus:
+          receipt?.status ??
+          (phase === "POST_BID" ? upstreamFailure?.status : undefined),
+        code: resultCode,
+        message:
+          outcome === "CONFIRMED"
+            ? "Bid tercatat di riwayat Bilcode."
+            : upstreamFailure?.response?.message ||
+              result.lastError ||
+              "Hasil pengajuan belum diketahui.",
+        action: bidAction(
+          outcome,
+          finalPhase,
+          upstreamFailure?.status,
+          resultCode,
+        ),
+        response: json(upstreamFailure?.response || receipt?.response || {}),
+      },
+    });
+    if (upstreamFailure?.auth) throw upstreamFailure;
+    return result;
   }
 }
