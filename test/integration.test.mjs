@@ -8,6 +8,7 @@ import { createDecipheriv } from "node:crypto";
 import dotenv from "dotenv";
 import { JwtService } from "@nestjs/jwt";
 import pg from "pg";
+import { safeResponse } from "../dist/bid-response.js";
 
 const base = "http://127.0.0.1:4101/api";
 const origin = "http://localhost:3100";
@@ -210,6 +211,10 @@ describe(
         }
         if (url.pathname === "/v1/chat/completions") {
           mock.aiCalls++;
+          if (mock.aiStatus)
+            return json(res, mock.aiStatus, {
+              message: "Model API key invalid. Bearer mock-ai-secret",
+            });
           if (mock.slowAi) {
             const timer = setTimeout(() => json(res, 503, {}), 4000);
             res.on("close", () => clearTimeout(timer));
@@ -263,6 +268,10 @@ describe(
           });
         }
         if (url.pathname === "/api/worker/my-bids") {
+          if (mock.forbiddenBids)
+            return json(res, 403, {
+              message: "Riwayat bid tidak dapat diakses.",
+            });
           if (
             mock.authRejected ||
             req.headers.authorization !== `Bearer ${mock.access}`
@@ -299,7 +308,8 @@ describe(
                 mock.bidErrorMessage || "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
               errors: {
                 "worker_analysis.tech_stack.0": [
-                  "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
+                  mock.bidFieldMessage ||
+                    "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
                 ],
                 secret: [mock.refresh],
               },
@@ -441,7 +451,7 @@ describe(
     beforeEach(async () => {
       await request("/monitor/stop", "POST");
       await pool.query(
-        'TRUNCATE "BidStatusEvent", "BidApplication", "BidProject", "BidSyncState", "Notification", "CheckRun", "EventLog"',
+        'TRUNCATE "BidAttempt", "BidStatusEvent", "BidApplication", "BidProject", "BidSyncState", "Notification", "CheckRun", "EventLog"',
       );
       await pool.query(
         'UPDATE "MonitorState" SET "authAlerted"=false, "lastError"=NULL, "lastCheckAt"=NULL, "lastSuccessAt"=NULL',
@@ -960,6 +970,151 @@ describe(
         "VALID",
       );
     });
+    test("bid responses retain actionable validation with redacted credentials and keep failed attempts after a successful retry", async () => {
+      const p = await prepareBid();
+      mock.rejectBidStatus = 422;
+      mock.bidErrorMessage = `Teknologi tidak tersedia. Bearer ${mock.access}; bilcode_refresh_token=${mock.refresh}; password=private-password-123`;
+      mock.bidFieldMessage = `Pilih teknologi dari daftar. ${mock.access}`;
+      await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      const first = await request("/bids/projects/611/attempts?page=1&limit=1");
+      assert.equal(first.status, 200);
+      assert.equal(first.data.total, 1);
+      const result = first.data.items[0];
+      assert.equal(result.outcome, "FAILED");
+      assert.equal(result.phase, "POST_BID");
+      assert.equal(result.httpStatus, 422);
+      assert.equal(result.postHttpStatus, 422);
+      assert.ok(result.message.includes("Teknologi tidak tersedia"));
+      assert.ok(
+        result.response.errors["worker_analysis.tech_stack.0"][0].includes(
+          "Pilih teknologi",
+        ),
+      );
+      assert.ok(result.action.includes("field"));
+      const serialized = JSON.stringify(first.data);
+      for (const secret of [mock.access, mock.refresh, "private-password-123"])
+        assert.ok(!serialized.includes(secret));
+      assert.ok(!Object.hasOwn(result.response.errors, "secret"));
+      mock.rejectBidStatus = 0;
+      await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      const latest = (
+        await request("/bids/projects/611/attempts?page=1&limit=1")
+      ).data;
+      assert.equal(latest.total, 2);
+      assert.equal(latest.pages, 2);
+      assert.equal(latest.items[0].outcome, "CONFIRMED");
+      assert.equal(latest.items[0].httpStatus, 200);
+      assert.equal(latest.items[0].response.message, "Success");
+      await stopApi();
+      await startApi();
+      const old = (await request("/bids/projects/611/attempts?page=2&limit=1"))
+        .data;
+      assert.equal(old.items[0].id, result.id);
+      assert.equal(old.items[0].outcome, "FAILED");
+      const dashboard = (await request("/bids")).data.applications[0];
+      assert.equal(dashboard._count.attempts, 2);
+      assert.equal(dashboard.attempts.length, 1);
+      const before = mock.calls;
+      await request("/bids/projects/611/attempts?page=1&limit=5");
+      assert.equal(mock.calls, before);
+      assert.equal(
+        (await request("/bids/projects/611/attempts", "GET", undefined, false))
+          .status,
+        401,
+      );
+      assert.equal((await request("/bids/projects/nope/attempts")).status, 400);
+    });
+    test("a failed precheck is saved with guidance and never calls AI or submits a bid", async () => {
+      const p = await prepareBid();
+      mock.forbiddenBids = true;
+      const r = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(r.status, 400);
+      const history = (await request("/bids/projects/611/attempts")).data;
+      assert.equal(history.total, 1);
+      assert.equal(history.items[0].phase, "PRECHECK");
+      assert.equal(history.items[0].httpStatus, 403);
+      assert.equal(history.items[0].postHttpStatus, null);
+      assert.equal(mock.aiCalls, 0);
+      assert.equal(mock.bidPosts.length, 0);
+      assert.equal(
+        (await request("/monitor/summary")).data.session.authStatus,
+        "VALID",
+      );
+    });
+    test("an AI provider auth failure has AI guidance and never invalidates the Bilcode session", async () => {
+      const p = await prepareBid();
+      mock.aiStatus = 401;
+      const r = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(r.data.state, "FAILED");
+      const result = (await request("/bids/projects/611/attempts")).data
+        .items[0];
+      assert.equal(result.phase, "AI");
+      assert.equal(result.httpStatus, 401);
+      assert.equal(result.code, "AI_REQUEST_FAILED");
+      assert.ok(result.action.includes("AI"));
+      assert.ok(!result.action.includes("OTP"));
+      assert.ok(!JSON.stringify(result).includes("mock-ai-secret"));
+      assert.equal(mock.bidPosts.length, 0);
+      assert.equal(
+        (await request("/monitor/summary")).data.session.authStatus,
+        "VALID",
+      );
+    });
+    test("response sanitization ignores arbitrary data, bounds messages, and masks request and environment secrets", () => {
+      const original = process.env.VIKEY_API_KEY;
+      process.env.VIKEY_API_KEY = "test-provider-private-key-123";
+      try {
+        const body = {
+          message: `Cek profil. test-provider-private-key-123 access-cookie-123 basic-password-123 ${"a".repeat(80)} eyJabc.def.ghi`,
+          errors: {
+            proposal: ["Perbaiki proposal.", true, { token: "leak" }],
+            password: ["ignore"],
+          },
+          data: { token: "ignore" },
+          stack: "ignore",
+        };
+        const result = safeResponse(body, {
+          headers: {
+            Cookie: "session=access-cookie-123",
+            Authorization:
+              "Basic " +
+              Buffer.from("user:basic-password-123").toString("base64"),
+          },
+        });
+        const serialized = JSON.stringify(result);
+        assert.ok(result.message.includes("Cek profil"));
+        for (const secret of [
+          "test-provider-private-key-123",
+          "access-cookie-123",
+          "basic-password-123",
+          "a".repeat(80),
+          "eyJabc.def.ghi",
+        ])
+          assert.ok(!serialized.includes(secret));
+        assert.deepEqual(Object.keys(result).sort(), ["errors", "message"]);
+        assert.deepEqual(result.errors.proposal, ["Perbaiki proposal."]);
+        assert.ok(
+          safeResponse({ message: "x".repeat(3000) }, {}).message.length <=
+            1000,
+        );
+        assert.deepEqual(safeResponse("<html>secret</html>", {}), {});
+      } finally {
+        if (original === undefined) delete process.env.VIKEY_API_KEY;
+        else process.env.VIKEY_API_KEY = original;
+      }
+    });
     test("invalid bid fields are reported without exposing upstream bodies and require a new confirmation", async () => {
       const p = await prepareBid();
       mock.rejectBidStatus = 422;
@@ -1081,6 +1236,11 @@ describe(
       await request("/monitor/stop", "POST");
       assert.equal((await submission).data.state, "FAILED");
       assert.equal(mock.bidPosts.length, 0);
+      const history = (await request("/bids/projects/611/attempts")).data;
+      assert.equal(history.items[0].code, "OPERATION_CANCELLED");
+      assert.ok(
+        history.items[0].action.includes("dihentikan sebelum pengiriman"),
+      );
       assert.equal(
         (await request("/monitor/summary")).data.state.desiredRunning,
         false,

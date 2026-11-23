@@ -93,6 +93,16 @@ Penolakan eksplisit POST dengan HTTP 400/401/403/404/405/410/422 dicatat FAILED,
 
 Pesan penolakan Bilcode yang dikenali untuk ketidakcocokan bidang keahlian dipetakan ke kode `BID_SKILL_MISMATCH`. Panel menampilkan penjelasan untuk memeriksa bidang pada profil Bilcode. Ini penolakan izin bisnis, bukan kesalahan AI atau sesi login. Sistem tidak mengubah bidang keahlian akun secara otomatis. Proyek yang muncul pada daftar available belum tentu memenuhi seluruh syarat pengajuan akun.
 
+### Riwayat respons dan tindakan
+
+Migrasi `20261123090000_bid_attempt_history` menambahkan tabel `BidAttempt`. Hasil pemrosesan pengajuan disimpan terpisah dari status aplikasi: outcome saat percobaan, waktu, tahap, status HTTP, kode, pesan respons yang dibersihkan, dan saran tindakan. Penolakan tidak ditimpa oleh percobaan berikutnya. HTTP 200 hanya menunjukkan respons POST; CONFIRMED tetap memerlukan pencocokan `my-bids`. Rekonsiliasi di kemudian hari dapat mengubah status aplikasi, sedangkan catatan hasil percobaan tetap merekam kondisi pada saatnya.
+
+`GET /api/bids` menyertakan hasil terakhir dan jumlah riwayat setiap aplikasi. `GET /api/bids/projects/:id/attempts?page=1&limit=5` membaca semua riwayat melalui pagination, dilindungi JWT panel. Membaca riwayat tidak melakukan request Bilcode, panggilan AI, atau pengiriman bid. Kegagalan upstream pada pemeriksaan awal proyek yang sudah tersimpan juga dicatat tanpa mengirim proposal. Penolakan input/konfirmasi tidak valid tetap mengikuti validasi endpoint biasa.
+
+Respons tersimpan hanya berisi `message` dan pesan validasi field proposal yang dikenal, bukan keseluruhan body upstream. Nilai credential request, secret environment, JWT, bentuk token umum, serta string panjang yang berpotensi menjadi token disamarkan; pesan dan jumlah field dibatasi. Ini upaya pembatasan data, bukan jaminan mengenali setiap jenis secret dalam teks bebas. HTML response dan properti lain seperti data, stack, cookie, serta header tidak disimpan. Audit umum tetap hanya mencatat metadata. Riwayat lama sebelum migrasi tidak dibuat-buat: pesan `lastError` sebelumnya tetap ditampilkan, tanpa mengarang respons historis.
+
+Jalankan backend beserta migrasi sebelum memperbarui frontend. Tidak ada environment baru. Pengujian memakai API tiruan dan database lokal terpisah; jangan menjalankan integration test pada Neon.
+
 Tambahkan `VIKEY_API_KEY` pada environment backend. Untuk deployment, tambahkan ke dalam nilai multiline secret **VPS_ENV**, bukan environment frontend. Model tetap `deepseek/deepseek-v4.1-flash-1017` melalui `https://api.vikey.ai/v1/chat/completions`. Migrasi `20261121090000_bid_automation` menambahkan cache proyek, pengajuan, status sinkronisasi, dan antrean notifikasi; jalankan `pnpm db:migrate` sebelum menjalankan kode baru. Workflow deployment menerapkannya otomatis.
 
 - `GET /api/bids?page=1&limit=10` membaca cache dan riwayat lokal, tanpa menghubungi AI atau mengajukan bid.
