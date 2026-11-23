@@ -67,7 +67,7 @@ pnpm audit
 pnpm run format
 ```
 
-`pnpm test` membangun backend kemudian menjalankan skenario integrasi. Database khusus `bilcode_monitoring_integration_test` dibuat ulang; database aplikasi tidak dihapus. API Bilcode/GOWA/Vikey memakai server tiruan, sehingga pengujian tidak membutuhkan frontend, cookie nyata, biaya AI, atau pengiriman WhatsApp sungguhan.
+`pnpm test` membangun backend kemudian menjalankan skenario integrasi dan tes konkurensi scheduler. Database khusus `bilcode_monitoring_integration_test` dibuat ulang; database aplikasi tidak dihapus. API Bilcode/GOWA/Vikey memakai server tiruan, sehingga pengujian tidak membutuhkan frontend, cookie nyata, biaya AI, atau pengiriman WhatsApp sungguhan. Tes konkurensi menggunakan promise barrier untuk memastikan urutan start/stop dan penyelesaian scheduler; urutan pemanggilan dua fetch tidak dianggap menjamin urutan kedatangan HTTP. Penulisan jadwal berikutnya mengikuti antrean operasi monitoring dan hanya dilakukan oleh timer yang masih berlaku.
 
 Dependency dan lockfile sekarang berada pada repo ini. Instalasi serta pengujian backend dapat dilakukan walaupun folder frontend tidak tersedia.
 

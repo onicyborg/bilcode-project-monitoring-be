@@ -1421,12 +1421,10 @@ describe(
         false,
       );
     });
-    test("a concurrent start and stop cannot leave a polling timer alive", async () => {
+    test("a stop after an acknowledged start clears polling and persisted running state", async () => {
       await importAndValidate();
-      const starting = request("/monitor/start", "POST");
-      const stopping = request("/monitor/stop", "POST");
-      assert.equal((await starting).status, 201);
-      assert.equal((await stopping).status, 201);
+      assert.equal((await request("/monitor/start", "POST")).status, 201);
+      assert.equal((await request("/monitor/stop", "POST")).status, 201);
       const before = mock.calls;
       await new Promise((resolve) => setTimeout(resolve, 150));
       const summary = (await request("/monitor/summary")).data;
