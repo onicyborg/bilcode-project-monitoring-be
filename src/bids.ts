@@ -499,12 +499,16 @@ export class Bids {
         error instanceof UpstreamError &&
         [400, 401, 403, 404, 405, 410, 422].includes(error.status || 0);
       const detail = `Proyek #${projectId} · ${phase} · ${upstreamDiagnostic(error)}`;
+      const rejection =
+        error instanceof UpstreamError && error.code === "BID_SKILL_MISMATCH"
+          ? "Bidang keahlian akun Bilcode tidak sesuai dengan kebutuhan proyek. Periksa bidang di profil Bilcode sebelum mengajukan kembali."
+          : "Bilcode menolak pengajuan.";
       await this.db.bidApplication.update({
         where: { id: app.id },
         data: {
           state: sending && !rejected ? "UNKNOWN" : "FAILED",
           lastError: rejected
-            ? `Bilcode menolak pengajuan. ${detail}. Proposal tersimpan lokal, bukan bukti bid terkirim.`
+            ? `${rejection} ${detail}. Proposal tersimpan lokal, bukan bukti bid terkirim.`
             : `${
                 sending
                   ? "Hasil pengiriman belum pasti. Sistem akan memeriksa my-bids; pengajuan tidak diulang otomatis."

@@ -58,6 +58,15 @@ async function call(
           /^[A-Z][A-Z0-9_]{1,63}$/.test(candidate)
         )
           code = candidate;
+        if (
+          response.status === 403 &&
+          isRecord(body) &&
+          typeof body.message === "string" &&
+          /^Bidang keahlian Anda tidak sesuai dengan kebutuhan proyek ini \([^()\r\n]{1,160}\)\.$/u.test(
+            body.message,
+          )
+        )
+          code = "BID_SKILL_MISMATCH";
         if (isRecord(body) && isRecord(body.errors)) {
           fields = Object.keys(body.errors)
             .filter((field) =>

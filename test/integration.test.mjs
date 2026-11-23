@@ -294,8 +294,9 @@ describe(
           assert.equal(req.headers.accept, "application/json");
           if (mock.rejectBidStatus)
             return json(res, mock.rejectBidStatus, {
-              code: "BID_REQUEST_REJECTED",
-              message: "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
+              code: mock.omitBidErrorCode ? undefined : "BID_REQUEST_REJECTED",
+              message:
+                mock.bidErrorMessage || "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
               errors: {
                 "worker_analysis.tech_stack.0": [
                   "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
@@ -933,6 +934,31 @@ describe(
       assert.ok(log.includes("HTTP 403"));
       assert.ok(!log.includes("PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK"));
       assert.ok(!log.includes(mock.refresh));
+    });
+    test("Bilcode skill mismatch is explained without expiring the session or changing the worker profile", async () => {
+      const p = await prepareBid();
+      mock.rejectBidStatus = 403;
+      mock.omitBidErrorCode = true;
+      mock.bidErrorMessage =
+        "Bidang keahlian Anda tidak sesuai dengan kebutuhan proyek ini (Diagram & Sistem).";
+      const rotations = mock.refreshCount;
+      const r = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(r.data.state, "FAILED");
+      assert.ok(
+        r.data.lastError.includes("Bidang keahlian akun Bilcode tidak sesuai"),
+      );
+      assert.ok(r.data.lastError.includes("BID_SKILL_MISMATCH"));
+      assert.ok(!r.data.lastError.includes("Diagram & Sistem"));
+      assert.equal(mock.refreshCount, rotations);
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(mock.bids.length, 0);
+      assert.equal(
+        (await request("/monitor/summary")).data.session.authStatus,
+        "VALID",
+      );
     });
     test("invalid bid fields are reported without exposing upstream bodies and require a new confirmation", async () => {
       const p = await prepareBid();
