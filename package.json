@@ -7,7 +7,7 @@
     "start": "node dist/main.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
-    "test": "pnpm run build && node --test --test-concurrency=1 test/integration.test.mjs",
+    "test": "pnpm run build && node --test --test-concurrency=1 test/*.test.mjs",
     "setup": "node scripts/setup.mjs",
     "format": "prettier --write \"src/*.ts\" \"test/*.mjs\" \"scripts/*.mjs\""
   },

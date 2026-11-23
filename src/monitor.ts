@@ -595,11 +595,13 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
   async stop() {
     this.pauseRequested = true;
     clearTimeout(this.timer);
+    this.timer = undefined;
     this.controller?.abort();
     return this.exclusive(async () => {
       // A queued start may have completed since stop was requested.
       this.pauseRequested = true;
       clearTimeout(this.timer);
+      this.timer = undefined;
       this.controller?.abort();
       await this.db.monitorState.update({
         where: { id: "main" },
@@ -629,31 +631,37 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
   }
   private schedule(milliseconds: number) {
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       this.inFlight = this.exclusive(() => this.cycle(false))
         .catch(() => {
           console.error("Monitoring cycle failed; inspect application logs.");
         })
         .finally(async () => {
           this.inFlight = undefined;
-          if (!this.pauseRequested && this.leaseHealthy) {
-            try {
-              const config = await this.db.configuration.findUniqueOrThrow({
-                where: { id: "main" },
-              });
-              const delay = config.intervalSeconds * 1000;
-              await this.db.monitorState.update({
-                where: { id: "main" },
-                data: { nextCheckAt: new Date(Date.now() + delay) },
-              });
-              if (!this.pauseRequested) this.schedule(delay);
-            } catch {
-              console.error("Failed to schedule next monitoring check.");
+          await this.exclusive(async () => {
+            const current = () =>
+              !this.pauseRequested && this.leaseHealthy && this.timer === timer;
+            if (current()) {
+              try {
+                const config = await this.db.configuration.findUniqueOrThrow({
+                  where: { id: "main" },
+                });
+                if (!current()) return;
+                const delay = config.intervalSeconds * 1000;
+                await this.db.monitorState.update({
+                  where: { id: "main" },
+                  data: { nextCheckAt: new Date(Date.now() + delay) },
+                });
+                if (current()) this.schedule(delay);
+              } catch {
+                console.error("Failed to schedule next monitoring check.");
+              }
             }
-          }
+          });
         });
     }, milliseconds);
-    this.timer.unref();
+    this.timer = timer;
+    timer.unref();
   }
   private safeError(error: unknown) {
     return error instanceof UpstreamError
