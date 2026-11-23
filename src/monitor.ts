@@ -326,7 +326,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
             },
           });
         }
-        await this.bids.syncFailure();
+        await this.bids.syncFailure(error);
         throw new BadRequestException(
           "Operasi bid belum selesai. Periksa status pengajuan dan sesi sebelum mencoba kembali.",
         );
@@ -732,7 +732,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
       } catch (error) {
         if (signal.aborted || (error instanceof UpstreamError && error.auth))
           throw error;
-        await this.bids.syncFailure();
+        await this.bids.syncFailure(error);
       }
       await this.bids.notify(config, signal);
       const projects = await this.fetchProjects(signal);

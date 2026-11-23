@@ -7,9 +7,22 @@ export class UpstreamError extends Error {
     message: string,
     readonly auth = false,
     readonly status?: number,
+    readonly code?: string,
+    readonly fields: string[] = [],
   ) {
     super(message);
   }
+}
+
+export function upstreamDiagnostic(error: unknown) {
+  if (!(error instanceof UpstreamError)) return "INTERNAL_OR_CANCELLED";
+  return [
+    error.status ? `HTTP ${error.status}` : "UPSTREAM_ERROR",
+    error.code,
+    error.fields.length ? `fields=${error.fields.join(",")}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -29,12 +42,40 @@ async function call(
         ? AbortSignal.any([signal, AbortSignal.timeout(15000)])
         : AbortSignal.timeout(15000),
     });
-    if (!response.ok)
+    if (!response.ok) {
+      let code: string | undefined;
+      let fields: string[] = [];
+      if (response.headers.get("cf-mitigated") === "challenge")
+        code = "CF_CHALLENGE";
+      else {
+        // Keep only an explicit machine code; upstream bodies may contain credentials or project text.
+        const body: unknown = await response.json().catch(() => null);
+        const candidate = isRecord(body)
+          ? (body.code ?? body.error_code)
+          : null;
+        if (
+          typeof candidate === "string" &&
+          /^[A-Z][A-Z0-9_]{1,63}$/.test(candidate)
+        )
+          code = candidate;
+        if (isRecord(body) && isRecord(body.errors)) {
+          fields = Object.keys(body.errors)
+            .filter((field) =>
+              /^(proposed_amount|estimated_days|proposal|worker_analysis(?:\.(?:features|tech_stack|estimated_days|technical_notes|client_clarifications|additional_notes)(?:\.\d{1,3})?)?)$/.test(
+                field,
+              ),
+            )
+            .slice(0, 20);
+        }
+      }
       throw new UpstreamError(
         `HTTP ${response.status}`,
-        response.status === 401 || response.status === 403,
+        response.status === 401,
         response.status,
+        code,
+        fields,
       );
+    }
     let data: unknown;
     try {
       data = await response.json();
@@ -47,8 +88,32 @@ async function call(
   } catch (error) {
     if (signal?.aborted) throw error;
     if (error instanceof UpstreamError) throw error;
+    const cause =
+      error && typeof error === "object" && "cause" in error
+        ? error.cause
+        : null;
+    const code =
+      cause &&
+      typeof cause === "object" &&
+      "code" in cause &&
+      [
+        "EAI_AGAIN",
+        "ENOTFOUND",
+        "ECONNRESET",
+        "ECONNREFUSED",
+        "ETIMEDOUT",
+        "UND_ERR_CONNECT_TIMEOUT",
+        "UND_ERR_SOCKET",
+      ].includes(String(cause.code))
+        ? String(cause.code)
+        : error instanceof Error && error.name === "TimeoutError"
+          ? "TIMEOUT"
+          : "NETWORK_FAILURE";
     throw new UpstreamError(
       "Koneksi API gagal atau melewati batas waktu 15 detik.",
+      false,
+      undefined,
+      code,
     );
   }
 }
@@ -183,6 +248,7 @@ export class Upstream {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
           Origin: "https://dashboard.bilcode.id",
+          Accept: "application/json",
         },
         body: JSON.stringify(payload),
       },

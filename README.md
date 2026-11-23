@@ -89,6 +89,8 @@ Panduan branch, GitHub Environment secrets, Neon development, serta deployment D
 
 Generator menyertakan [panduan Humanizer-zh yang diadaptasi ke bahasa Indonesia](docs/humanizer-zh/README.md) untuk menyunting gaya sebelum JSON akhir dikembalikan. Panduan mengurangi pengulangan dan ungkapan template sambil mempertahankan lingkup, syarat, dan fakta. Tetap satu panggilan model; tidak ada jaminan lolos detektor AI. Tidak perlu environment tambahan.
 
+Penolakan eksplisit POST dengan HTTP 400/401/403/404/405/410/422 dicatat FAILED, lengkap dengan tahap, status HTTP, kode mesin, dan nama field validasi yang dikenal. Respons mentah upstream tidak dicatat. Hanya HTTP 401 memicu refresh/invalidation autentikasi; 403 tidak membuktikan token kedaluwarsa. Error koneksi, 5xx, konflik 409, atau rekonsiliasi yang gagal tetap UNKNOWN setelah pengiriman dimulai. File proposal lokal bukan bukti bid diterima; hanya pencocokan `my-bids` menetapkan CONFIRMED.
+
 Tambahkan `VIKEY_API_KEY` pada environment backend. Untuk deployment, tambahkan ke dalam nilai multiline secret **VPS_ENV**, bukan environment frontend. Model tetap `deepseek/deepseek-v4.1-flash-1017` melalui `https://api.vikey.ai/v1/chat/completions`. Migrasi `20261121090000_bid_automation` menambahkan cache proyek, pengajuan, status sinkronisasi, dan antrean notifikasi; jalankan `pnpm db:migrate` sebelum menjalankan kode baru. Workflow deployment menerapkannya otomatis.
 
 - `GET /api/bids?page=1&limit=10` membaca cache dan riwayat lokal, tanpa menghubungi AI atau mengajukan bid.

@@ -291,6 +291,18 @@ describe(
           for await (const chunk of req) raw += chunk;
           const payload = JSON.parse(raw);
           mock.bidPosts.push(payload);
+          assert.equal(req.headers.accept, "application/json");
+          if (mock.rejectBidStatus)
+            return json(res, mock.rejectBidStatus, {
+              code: "BID_REQUEST_REJECTED",
+              message: "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
+              errors: {
+                "worker_analysis.tech_stack.0": [
+                  "PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK",
+                ],
+                secret: [mock.refresh],
+              },
+            });
           if (mock.unknownBid) {
             res.destroy();
             return;
@@ -894,6 +906,74 @@ describe(
       assert.equal(
         (await request("/bids")).data.applications[0].status,
         "applied",
+      );
+    });
+    test("a forbidden bid is recorded as rejected without refreshing or logging out a valid Bilcode session", async () => {
+      const p = await prepareBid();
+      const rotations = mock.refreshCount;
+      mock.rejectBidStatus = 403;
+      const r = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(r.status, 201);
+      assert.equal(r.data.state, "FAILED");
+      assert.equal(r.data.upstreamId, null);
+      assert.match(r.data.lastError, /POST_BID.*HTTP 403/);
+      assert.equal(mock.refreshCount, rotations);
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(mock.bids.length, 0);
+      assert.equal(
+        (await request("/monitor/summary")).data.session.authStatus,
+        "VALID",
+      );
+      assert.equal(mock.messages.length, 0);
+      const log = JSON.stringify((await request("/logs/events")).data);
+      assert.ok(log.includes("BID_REJECTED"));
+      assert.ok(log.includes("HTTP 403"));
+      assert.ok(!log.includes("PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK"));
+      assert.ok(!log.includes(mock.refresh));
+    });
+    test("invalid bid fields are reported without exposing upstream bodies and require a new confirmation", async () => {
+      const p = await prepareBid();
+      mock.rejectBidStatus = 422;
+      const r = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(r.data.state, "FAILED");
+      assert.match(r.data.lastError, /HTTP 422/);
+      assert.ok(r.data.lastError.includes("worker_analysis.tech_stack.0"));
+      assert.ok(
+        !r.data.lastError.includes("PRIVATE_UPSTREAM_DETAIL_MUST_NOT_LEAK"),
+      );
+      assert.ok(!r.data.lastError.includes("secret"));
+      assert.equal(mock.bidPosts.length, 1);
+      await request("/bids/refresh", "POST");
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(
+        (await request("/monitor/summary")).data.session.authStatus,
+        "VALID",
+      );
+    });
+    test("an actual unauthorized bid still refreshes once and marks the upstream session invalid", async () => {
+      const p = await prepareBid();
+      const rotations = mock.refreshCount;
+      mock.rejectBidStatus = 401;
+      const r = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(r.status, 400);
+      assert.equal(mock.refreshCount, rotations + 1);
+      assert.equal(mock.bids.length, 0);
+      assert.equal(
+        (await request("/monitor/summary")).data.session.authStatus,
+        "INVALID",
+      );
+      assert.equal(
+        (await request("/bids")).data.applications[0].state,
+        "FAILED",
       );
     });
     test("existing manual bids are baselined across every page and status notifications survive gateway failure and restart", async () => {
