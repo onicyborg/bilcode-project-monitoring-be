@@ -4,6 +4,7 @@ services:
     image: ${API_IMAGE:?Set API_IMAGE in .deployment.env}
     restart: unless-stopped
     init: true
+    dns: [1.1.1.1, 9.9.9.9]
     env_file:
       - path: .env
         format: raw

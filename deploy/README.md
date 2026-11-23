@@ -36,6 +36,8 @@ Instalasi database baru dalam keadaan monitoring berhenti. Impor dan validasi co
 
 ## Pemeriksaan setelah rilis
 
+Compose API menetapkan DNS upstream `1.1.1.1` dan `9.9.9.9`. Keduanya diuji dari container VPS pada 23 November 2026; resolver host `8.8.8.8` timeout saat mengakses domain Bilcode dan Neon. Docker tetap menyediakan nama service pada network internal melalui resolver bawaannya. Jika provider mengubah kebijakan jaringan, uji resolver dari container sebelum mengganti konfigurasi.
+
 ```bash
 curl -fsS https://api-bilcode-monitoring.geats.web.id/api/health
 curl -fsS https://bilcode-monitoring.geats.web.id/api/health

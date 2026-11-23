@@ -6,7 +6,12 @@ import {
 import { createHash } from "node:crypto";
 import { Database } from "./database";
 import { Audit } from "./audit";
-import { isRecord, Upstream, UpstreamError } from "./upstream";
+import {
+  isRecord,
+  Upstream,
+  UpstreamError,
+  upstreamDiagnostic,
+} from "./upstream";
 import { Configuration, Prisma } from "./generated/prisma/client";
 import { proposalStyle } from "./proposal-style";
 
@@ -351,19 +356,20 @@ export class Bids {
       { timeout: 60000 },
     );
   }
-  async syncFailure() {
+  async syncFailure(error?: unknown) {
+    const detail = error ? ` · ${upstreamDiagnostic(error)}` : "";
     await this.db.bidSyncState.upsert({
       where: { id: "main" },
       create: {
-        lastError: "Pengecekan bid gagal. Status sebelumnya dipertahankan.",
+        lastError: `Pengecekan bid gagal. Status sebelumnya dipertahankan.${detail}`,
       },
       update: {
-        lastError: "Pengecekan bid gagal. Status sebelumnya dipertahankan.",
+        lastError: `Pengecekan bid gagal. Status sebelumnya dipertahankan.${detail}`,
       },
     });
     await this.audit.record(
       "BID_SYNC_FAILED",
-      "Pengecekan riwayat bid gagal; status sebelumnya dipertahankan.",
+      `Pengecekan riwayat bid gagal; status sebelumnya dipertahankan.${detail}`,
       "WARNING",
     );
   }
@@ -446,6 +452,7 @@ export class Bids {
       update: { state: "GENERATING", lastError: null, confirmedAt: new Date() },
     });
     let sending = false;
+    let phase = "AI";
     try {
       await this.audit.record(
         "BID_CONFIRMED",
@@ -453,6 +460,7 @@ export class Bids {
       );
       const proposal = await this.generate(payload, signal);
       if (signal.aborted) throw new Error("Cancelled");
+      phase = "RECHECK_PROJECT";
       await refreshProjects();
       const current = await this.db.bidProject.findUniqueOrThrow({
         where: { projectId },
@@ -472,6 +480,7 @@ export class Bids {
         data: { state: "SUBMITTING", proposalPayload: json(proposal) },
       });
       sending = true;
+      phase = "POST_BID";
       await authorized((token) =>
         this.upstream.submitBid(token, projectId, proposal, signal),
       );
@@ -482,29 +491,47 @@ export class Bids {
           lastError: "Request diterima. Menunggu pencatatan di riwayat bid.",
         },
       });
+      phase = "RECONCILE";
       await this.sync(authorized, signal);
     } catch (error) {
+      const rejected =
+        phase === "POST_BID" &&
+        error instanceof UpstreamError &&
+        [400, 401, 403, 404, 405, 410, 422].includes(error.status || 0);
+      const detail = `Proyek #${projectId} · ${phase} · ${upstreamDiagnostic(error)}`;
       await this.db.bidApplication.update({
         where: { id: app.id },
         data: {
-          state: sending ? "UNKNOWN" : "FAILED",
-          lastError: sending
-            ? "Hasil pengiriman belum pasti. Sistem akan memeriksa my-bids; pengajuan tidak diulang otomatis."
-            : "Proposal belum dikirim: AI gagal, proyek berubah, atau operasi dihentikan. Konfirmasi ulang jika ingin mencoba lagi.",
+          state: sending && !rejected ? "UNKNOWN" : "FAILED",
+          lastError: rejected
+            ? `Bilcode menolak pengajuan. ${detail}. Proposal tersimpan lokal, bukan bukti bid terkirim.`
+            : `${
+                sending
+                  ? "Hasil pengiriman belum pasti. Sistem akan memeriksa my-bids; pengajuan tidak diulang otomatis."
+                  : "Proposal belum dikirim: AI gagal, proyek berubah, atau operasi dihentikan. Konfirmasi ulang jika ingin mencoba lagi."
+              } ${detail}`,
         },
       });
       await this.audit.record(
-        sending ? "BID_RECONCILIATION_REQUIRED" : "BID_PREPARATION_FAILED",
-        sending
-          ? "Hasil bid belum pasti. Menunggu rekonsiliasi."
-          : "Persiapan bid gagal; tidak ada pengiriman.",
+        rejected
+          ? "BID_REJECTED"
+          : sending
+            ? "BID_RECONCILIATION_REQUIRED"
+            : "BID_PREPARATION_FAILED",
+        `${
+          rejected
+            ? "Bilcode menolak request bid."
+            : sending
+              ? "Hasil bid belum pasti. Menunggu rekonsiliasi."
+              : "Persiapan bid gagal; tidak ada pengiriman."
+        } ${detail}`,
         "WARNING",
       );
       if (sending && !signal.aborted) {
         try {
           await this.sync(authorized, signal);
-        } catch {
-          await this.syncFailure();
+        } catch (syncError) {
+          await this.syncFailure(syncError);
         }
       }
       if (error instanceof UpstreamError && error.auth) throw error;
