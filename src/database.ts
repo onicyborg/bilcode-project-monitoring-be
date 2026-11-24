@@ -9,7 +9,13 @@ export class Database
 {
   constructor() {
     super({
-      adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
+      adapter: new PrismaPg({
+        connectionString: process.env.DATABASE_URL,
+        connectionTimeoutMillis: 10000,
+        query_timeout: 15000,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10000,
+      }),
     });
   }
   async onModuleInit() {

@@ -6,6 +6,7 @@ import {
   Param,
   ParseUUIDPipe,
   ParseIntPipe,
+  ServiceUnavailableException,
   Post,
   Put,
   Query,
@@ -279,9 +280,28 @@ export class LogsController {
 
 @Controller("health")
 export class HealthController {
-  constructor(private readonly db: Database) {}
+  constructor(
+    private readonly db: Database,
+    private readonly monitor: Monitor,
+  ) {}
   @Get() async health() {
-    await this.db.$queryRaw`SELECT 1`;
-    return { status: "ok", database: "connected" };
+    if (!this.monitor.isLeaseHealthy())
+      throw new ServiceUnavailableException(
+        "Koneksi pengendali monitoring terputus.",
+      );
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.db.$queryRaw`SELECT 1`,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Health timeout")), 3000);
+        }),
+      ]);
+      return { status: "ok", database: "connected" };
+    } catch {
+      throw new ServiceUnavailableException("Koneksi database belum tersedia.");
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
