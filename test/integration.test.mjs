@@ -261,7 +261,11 @@ describe(
                 message: {
                   content: mock.malformedAi
                     ? "invalid-json"
-                    : JSON.stringify(proposal),
+                    : JSON.stringify({
+                        is_system_development: mock.isDevelopment ?? false,
+                        reason: "Klasifikasi berdasarkan lingkup pekerjaan.",
+                        bid: proposal,
+                      }),
                 },
               },
             ],
@@ -451,7 +455,7 @@ describe(
     beforeEach(async () => {
       await request("/monitor/stop", "POST");
       await pool.query(
-        'TRUNCATE "BidAttempt", "BidStatusEvent", "BidApplication", "BidProject", "BidSyncState", "Notification", "CheckRun", "EventLog"',
+        'TRUNCATE "BidDraft", "BidAttempt", "BidStatusEvent", "BidApplication", "BidProject", "BidSyncState", "Notification", "CheckRun", "EventLog"',
       );
       await pool.query(
         'UPDATE "MonitorState" SET "authAlerted"=false, "lastError"=NULL, "lastCheckAt"=NULL, "lastSuccessAt"=NULL',
@@ -465,6 +469,7 @@ describe(
         gowaPassword: "mock-gowa-secret",
         deviceId: "personal",
         authAlerts: true,
+        autoBid: false,
       });
       assert.equal(settings.status, 200);
       await request("/session/cookie", "DELETE");
@@ -812,6 +817,255 @@ describe(
         (p) => p.projectId === 611,
       );
     }
+    async function enableAutoBid() {
+      assert.equal(
+        (
+          await request("/settings", "PUT", {
+            intervalSeconds: 60,
+            phone: "6281347890520",
+            gowaUrl: `http://127.0.0.1:${upstreamPort}`,
+            gowaUsername: "test",
+            deviceId: "personal",
+            authAlerts: true,
+            autoBid: true,
+          })
+        ).status,
+        200,
+      );
+    }
+    async function runScheduledCycle() {
+      const before = (
+        await pool.query('SELECT count(*)::int AS n FROM "CheckRun"')
+      ).rows[0].n;
+      assert.equal((await request("/monitor/start", "POST")).status, 201);
+      await waitFor(async () => {
+        const rows = (
+          await pool.query(
+            'SELECT status FROM "CheckRun" ORDER BY "startedAt" DESC',
+          )
+        ).rows;
+        return rows.length > before && rows[0].status !== "RUNNING";
+      }, "Scheduled cycle did not finish");
+      await request("/monitor/stop", "POST");
+    }
+    test("discovery prepares a non-development draft once, survives restart and manual approval sends it without another AI call", async () => {
+      mock.projects = [
+        {
+          ...sampleProject(),
+          title: "Analisis RapidMiner",
+          description: "Analisis data saja, bukan aplikasi.",
+        },
+      ];
+      await importAndValidate();
+      await enableAutoBid();
+      await runScheduledCycle();
+      let p = (await request("/bids")).data.projects[0];
+      assert.equal(p.draft.state, "READY");
+      assert.equal(p.draft.isDevelopment, false);
+      assert.equal(mock.aiCalls, 1);
+      assert.equal(mock.bidPosts.length, 0);
+      assert.ok(
+        mock.messages[0].message.indexOf("Kebutuhan:") <
+          mock.messages[0].message.indexOf("```"),
+      );
+      const original = p.draft.proposalPayload;
+      await stopApi();
+      await startApi();
+      await runScheduledCycle();
+      p = (await request("/bids")).data.projects[0];
+      assert.equal(mock.aiCalls, 1);
+      const result = await request("/bids/projects/611/submit", "POST", {
+        version: p.version,
+        confirmed: true,
+      });
+      assert.equal(result.data.state, "CONFIRMED");
+      assert.equal(mock.aiCalls, 1);
+      assert.deepEqual(mock.bidPosts[0], original);
+    });
+    test("one classification and proposal call auto-bids development regardless of bidang and never posts twice", async () => {
+      mock.projects = [
+        {
+          ...sampleProject(),
+          bidang: ["Diagram & Sistem"],
+          tech_stack: ["Any custom stack"],
+        },
+      ];
+      mock.isDevelopment = true;
+      await importAndValidate();
+      await enableAutoBid();
+      await runScheduledCycle();
+      let d = (await request("/bids")).data;
+      assert.equal(mock.aiCalls, 1);
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(d.applications[0].state, "CONFIRMED");
+      assert.equal(d.applications[0].source, "AUTO");
+      const autoMessage = mock.messages.find((m) =>
+        m.message.includes("Pengajuan otomatis tercatat"),
+      );
+      assert.ok(autoMessage);
+      assert.ok(
+        autoMessage.message.indexOf("menunggu keputusan") <
+          autoMessage.message.indexOf("```"),
+      );
+      assert.equal(mock.messages.length, 2);
+      await runScheduledCycle();
+      assert.equal(mock.aiCalls, 1);
+      assert.equal(mock.bidPosts.length, 1);
+      mock.bids[0].status = "selected";
+      await runScheduledCycle();
+      assert.equal(mock.messages.length, 3);
+      assert.match(
+        mock.messages[2].message.split("```")[0],
+        /menunggu keputusan → diterima/,
+      );
+    });
+    test("disabling auto-bid and a one-off stopped check prepare drafts without submitting", async () => {
+      mock.projects = [sampleProject()];
+      mock.isDevelopment = true;
+      await importAndValidate();
+      await runScheduledCycle();
+      assert.equal(mock.aiCalls, 1);
+      assert.equal(mock.bidPosts.length, 0);
+      await enableAutoBid();
+      await request("/monitor/check", "POST");
+      assert.equal(mock.bidPosts.length, 0);
+      await runScheduledCycle();
+      assert.equal(mock.aiCalls, 1);
+      assert.equal(mock.bidPosts.length, 1);
+    });
+    test("invalid classification or AI failure saves a failed draft, never submits and never logs out Bilcode", async () => {
+      mock.projects = [sampleProject()];
+      mock.isDevelopment = "true";
+      await importAndValidate();
+      await enableAutoBid();
+      await runScheduledCycle();
+      assert.equal(
+        (await request("/bids")).data.projects[0].draft.state,
+        "FAILED",
+      );
+      assert.equal(mock.bidPosts.length, 0);
+      await runScheduledCycle();
+      assert.equal(mock.aiCalls, 1);
+      assert.equal(
+        (await request("/monitor/summary")).data.session.authStatus,
+        "VALID",
+      );
+    });
+    test("an automatically rejected bid is notified, retained and never retried by discovery", async () => {
+      mock.projects = [sampleProject()];
+      mock.isDevelopment = true;
+      mock.rejectBidStatus = 403;
+      await importAndValidate();
+      await enableAutoBid();
+      await runScheduledCycle();
+      assert.equal(
+        (await request("/bids")).data.applications[0].state,
+        "FAILED",
+      );
+      assert.equal(mock.bidPosts.length, 1);
+      assert.match(
+        mock.messages
+          .find((m) => m.message.includes("Hasil pengajuan otomatis"))
+          .message.split("```")[0],
+        /gagal/,
+      );
+      await stopApi();
+      await startApi();
+      await runScheduledCycle();
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(mock.aiCalls, 1);
+      assert.equal(
+        (await request("/monitor/summary")).data.session.authStatus,
+        "VALID",
+      );
+    });
+    test("an ambiguous automatic submission is reconciled across restart without another POST and notifications retry", async () => {
+      mock.projects = [sampleProject()];
+      mock.isDevelopment = true;
+      mock.unknownBid = true;
+      mock.failGowa = true;
+      await importAndValidate();
+      await enableAutoBid();
+      await runScheduledCycle();
+      assert.equal(
+        (await request("/bids")).data.applications[0].state,
+        "UNKNOWN",
+      );
+      assert.equal(mock.bidPosts.length, 1);
+      await stopApi();
+      await startApi();
+      mock.failGowa = false;
+      mock.bids = [
+        {
+          id: 310,
+          project_id: 611,
+          status: "applied",
+          project: { title: "Website UMKM" },
+        },
+      ];
+      await runScheduledCycle();
+      assert.equal(
+        (await request("/bids")).data.applications[0].state,
+        "CONFIRMED",
+      );
+      assert.equal(mock.bidPosts.length, 1);
+      assert.equal(mock.aiCalls, 1);
+      assert.ok(
+        mock.messages.some((m) =>
+          m.message.includes("Pengajuan otomatis tercatat"),
+        ),
+      );
+    });
+    test("changed project scope blocks a stored draft until fresh confirmation prepares the updated scope", async () => {
+      mock.projects = [sampleProject()];
+      await importAndValidate();
+      await runScheduledCycle();
+      const old = (await request("/bids")).data.projects[0];
+      mock.projects[0].description = "Redesign dan penambahan fitur baru";
+      assert.equal(
+        (
+          await request("/bids/projects/611/submit", "POST", {
+            version: old.version,
+            confirmed: true,
+          })
+        ).status,
+        409,
+      );
+      assert.equal(mock.bidPosts.length, 0);
+      assert.equal(mock.aiCalls, 1);
+      const updated = (await request("/bids")).data.projects[0];
+      assert.equal(
+        (
+          await request("/bids/projects/611/submit", "POST", {
+            version: updated.version,
+            confirmed: true,
+          })
+        ).data.state,
+        "CONFIRMED",
+      );
+      assert.equal(mock.aiCalls, 2);
+    });
+    test("stop aborts discovery analysis without auto-submission, and restart does not automatically retry the aborted draft", async () => {
+      mock.projects = [sampleProject()];
+      mock.isDevelopment = true;
+      mock.slowAi = true;
+      await importAndValidate();
+      await enableAutoBid();
+      await request("/monitor/start", "POST");
+      await waitFor(() => mock.aiCalls === 1, "Discovery AI not started");
+      await request("/monitor/stop", "POST");
+      assert.equal(mock.bidPosts.length, 0);
+      assert.equal(
+        (await request("/bids")).data.projects[0].draft.state,
+        "FAILED",
+      );
+      mock.slowAi = false;
+      await stopApi();
+      await startApi();
+      await runScheduledCycle();
+      assert.equal(mock.bidPosts.length, 0);
+      assert.equal(mock.aiCalls, 1);
+    });
     test("project and bid filters paginate independently and use submission order instead of sync time", async () => {
       for (const [id, available, applied] of [
         [700, true, false],
