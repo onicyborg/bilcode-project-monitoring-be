@@ -36,7 +36,7 @@ import {
 } from "./dto";
 import { Monitor } from "./monitor";
 import { Bids } from "./bids";
-import { SubmitBidDto } from "./dto";
+import { SubmitBidDto, BidsQueryDto } from "./dto";
 
 @ApiTags("Bids")
 @ApiBearerAuth()
@@ -47,8 +47,8 @@ export class BidsController {
     private readonly bids: Bids,
     private readonly monitor: Monitor,
   ) {}
-  @Get() dashboard(@Query() query: PageDto) {
-    return this.bids.dashboard(query.page, query.limit);
+  @Get() dashboard(@Query() query: BidsQueryDto) {
+    return this.bids.dashboard(query.page, query.limit, query);
   }
   @Post("refresh") refresh() {
     return this.monitor.refreshBidDashboard();
