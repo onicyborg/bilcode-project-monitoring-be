@@ -95,7 +95,17 @@ Penolakan eksplisit POST dengan HTTP 400/401/403/404/405/410/422 dicatat FAILED,
 
 Pesan penolakan Bilcode yang dikenali untuk ketidakcocokan bidang keahlian dipetakan ke kode `BID_SKILL_MISMATCH`. Panel menampilkan penjelasan untuk memeriksa bidang pada profil Bilcode. Ini penolakan izin bisnis, bukan kesalahan AI atau sesi login. Sistem tidak mengubah bidang keahlian akun secara otomatis. Proyek yang muncul pada daftar available belum tentu memenuhi seluruh syarat pengajuan akun.
 
-### Riwayat respons dan tindakan
+### Filter daftar proyek dan penawaran
+
+`GET /api/bids` mendukung `projectFilter=all|available|archive`, `applicationFilter=all|confirmed|selected|rejected|applied|failed|unknown|processing`, `projectPage`, dan `applicationPage` dengan limit bersama. Pagination kedua daftar independen dan response menyertakan `projectPages`, `applicationPages`, serta counts setiap kategori. Query lama `page` tetap didukung bila page khusus tidak diberikan. `focusProject` membatasi daftar proyek ke ID pada tautan notifikasi; tidak mengajukan bid.
+
+Proyek available harus tersedia pada sinkronisasi terakhir, belum hasApplied, dan tidak memiliki pengajuan lokal selain FAILED. Arsip adalah komplemennya, sehingga pengajuan UNKNOWN/GENERATING/SUBMITTING juga tidak muncul sebagai proyek baru yang dapat dikirim ulang. Ini filter ketersediaan, bukan jaminan kecocokan keahlian akun Bilcode.
+
+Filter confirmed berarti tercatat di Bilcode, termasuk bid yang kemudian selected/rejected; keputusan upstream terpisah dari FAILED yang berarti pengiriman gagal. Nilai status upstream lain tetap terlihat pada all/confirmed. Semua filter diterapkan sebelum pagination, tanpa panggilan AI atau upstream.
+
+Migrasi `20261124095000_bid_submission_order` menambahkan `submittedAt` dan index untuk urutan pengajuan terbaru. Data lama diisi dari confirmedAt, atau createdAt bila tidak tersedia. Konfirmasi ulang memperbarui waktunya; bid manual memakai created_at upstream bila valid. Sinkronisasi rutin tidak menggeser waktu pengajuan lokal. Proyek diurutkan berdasarkan ID terbaru agar pembaruan observedAt tidak mengacak kartu. Deploy backend dan migrasi sebelum frontend. Tidak ada environment baru.
+
+### Detail riwayat respons
 
 Migrasi `20261123090000_bid_attempt_history` menambahkan tabel `BidAttempt`. Hasil pemrosesan pengajuan disimpan terpisah dari status aplikasi: outcome saat percobaan, waktu, tahap, status HTTP, kode, pesan respons yang dibersihkan, dan saran tindakan. Penolakan tidak ditimpa oleh percobaan berikutnya. HTTP 200 hanya menunjukkan respons POST; CONFIRMED tetap memerlukan pencocokan `my-bids`. Rekonsiliasi di kemudian hari dapat mengubah status aplikasi, sedangkan catatan hasil percobaan tetap merekam kondisi pada saatnya.
 

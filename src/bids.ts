@@ -170,18 +170,63 @@ export class Bids {
       { timeout: 60000 },
     );
   }
-  async dashboard(page: number, limit: number) {
+  async dashboard(
+    page: number,
+    limit: number,
+    query?: {
+      projectPage?: number;
+      applicationPage?: number;
+      projectFilter: string;
+      applicationFilter: string;
+      focusProject?: number;
+    },
+  ) {
+    const blocked = await this.db.bidApplication.findMany({
+      where: { state: { not: "FAILED" } },
+      select: { projectId: true },
+    });
+    const available: Prisma.BidProjectWhereInput = {
+      available: true,
+      hasApplied: false,
+      projectId: { notIn: blocked.map((a) => a.projectId) },
+    };
+    const filterWhere: Prisma.BidProjectWhereInput =
+      query?.projectFilter === "available"
+        ? available
+        : query?.projectFilter === "archive"
+          ? { NOT: available }
+          : {};
+    const projectWhere: Prisma.BidProjectWhereInput = query?.focusProject
+      ? { AND: [filterWhere, { projectId: query.focusProject }] }
+      : filterWhere;
+    const f = query?.applicationFilter || "all";
+    const applicationWhere: Prisma.BidApplicationWhereInput =
+      f === "confirmed"
+        ? { state: "CONFIRMED" }
+        : f === "failed"
+          ? { state: "FAILED" }
+          : f === "unknown"
+            ? { state: "UNKNOWN" }
+            : f === "processing"
+              ? { state: { in: ["GENERATING", "SUBMITTING"] } }
+              : ["selected", "rejected", "applied"].includes(f)
+                ? { state: "CONFIRMED", status: f }
+                : {};
+    const projectPage = query?.projectPage || page,
+      applicationPage = query?.applicationPage || page;
     const [projects, projectTotal, applications, applicationTotal, sync] =
       await Promise.all([
         this.db.bidProject.findMany({
-          orderBy: { observedAt: "desc" },
-          skip: (page - 1) * limit,
+          where: projectWhere,
+          orderBy: [{ projectId: "desc" }],
+          skip: (projectPage - 1) * limit,
           take: limit,
         }),
-        this.db.bidProject.count(),
+        this.db.bidProject.count({ where: projectWhere }),
         this.db.bidApplication.findMany({
-          orderBy: { updatedAt: "desc" },
-          skip: (page - 1) * limit,
+          where: applicationWhere,
+          orderBy: [{ submittedAt: "desc" }, { id: "desc" }],
+          skip: (applicationPage - 1) * limit,
           take: limit,
           include: {
             events: { orderBy: { createdAt: "desc" }, take: 5 },
@@ -192,13 +237,44 @@ export class Bids {
             _count: { select: { attempts: true } },
           },
         }),
-        this.db.bidApplication.count(),
+        this.db.bidApplication.count({ where: applicationWhere }),
         this.db.bidSyncState.findUnique({ where: { id: "main" } }),
       ]);
     const states = await this.db.bidApplication.findMany({
       where: { projectId: { in: projects.map((p) => p.projectId) } },
       select: { projectId: true, state: true },
     });
+    const [projectAll, projectAvailable, groups] = await Promise.all([
+      this.db.bidProject.count(),
+      this.db.bidProject.count({ where: available }),
+      this.db.bidApplication.groupBy({ by: ["state", "status"], _count: true }),
+    ]);
+    const applicationCounts: Record<string, number> = {
+      all: 0,
+      confirmed: 0,
+      selected: 0,
+      rejected: 0,
+      applied: 0,
+      failed: 0,
+      unknown: 0,
+      processing: 0,
+    };
+    for (const group of groups) {
+      const n = group._count;
+      applicationCounts.all += n;
+      if (group.state === "CONFIRMED") {
+        applicationCounts.confirmed += n;
+        if (
+          group.status &&
+          ["selected", "rejected", "applied"].includes(group.status)
+        )
+          applicationCounts[group.status] += n;
+      }
+      if (group.state === "FAILED") applicationCounts.failed += n;
+      if (group.state === "UNKNOWN") applicationCounts.unknown += n;
+      if (["GENERATING", "SUBMITTING"].includes(group.state))
+        applicationCounts.processing += n;
+    }
     return {
       projects: projects.map((p) => ({
         ...p,
@@ -207,6 +283,18 @@ export class Bids {
           states.find((a) => a.projectId === p.projectId)?.state || null,
       })),
       applications,
+      counts: {
+        projects: {
+          all: projectAll,
+          available: projectAvailable,
+          archive: projectAll - projectAvailable,
+        },
+        applications: applicationCounts,
+      },
+      projectPage,
+      applicationPage,
+      projectPages: Math.max(1, Math.ceil(projectTotal / limit)),
+      applicationPages: Math.max(1, Math.ceil(applicationTotal / limit)),
       page,
       pages: Math.max(
         1,
@@ -337,6 +425,12 @@ export class Bids {
           const current = await tx.bidApplication.upsert({
             where: { projectId: Number(row.project_id) },
             update: {
+              submittedAt:
+                !previous?.confirmedAt &&
+                typeof row.created_at === "string" &&
+                Number.isFinite(Date.parse(row.created_at))
+                  ? new Date(row.created_at)
+                  : undefined,
               title,
               upstreamId: Number(row.id),
               status: String(row.status),
@@ -345,6 +439,11 @@ export class Bids {
               lastSyncedAt: new Date(),
             },
             create: {
+              submittedAt:
+                typeof row.created_at === "string" &&
+                Number.isFinite(Date.parse(row.created_at))
+                  ? new Date(row.created_at)
+                  : undefined,
               projectId: Number(row.project_id),
               title,
               upstreamId: Number(row.id),
@@ -463,8 +562,9 @@ export class Bids {
         state: "FAILED",
         lastError,
         confirmedAt: new Date(),
+        submittedAt: new Date(),
       },
-      update: { lastError, confirmedAt: new Date() },
+      update: { lastError, confirmedAt: new Date(), submittedAt: new Date() },
     });
     await this.db.bidAttempt.create({
       data: {
@@ -525,8 +625,14 @@ export class Bids {
         title: project.title,
         state: "GENERATING",
         confirmedAt: new Date(),
+        submittedAt: new Date(),
       },
-      update: { state: "GENERATING", lastError: null, confirmedAt: new Date() },
+      update: {
+        state: "GENERATING",
+        lastError: null,
+        confirmedAt: new Date(),
+        submittedAt: new Date(),
+      },
     });
     let sending = false;
     let phase = "AI";

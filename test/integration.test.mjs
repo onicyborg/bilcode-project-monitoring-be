@@ -812,6 +812,109 @@ describe(
         (p) => p.projectId === 611,
       );
     }
+    test("project and bid filters paginate independently and use submission order instead of sync time", async () => {
+      for (const [id, available, applied] of [
+        [700, true, false],
+        [701, true, true],
+        [702, false, false],
+        [703, true, false],
+        [704, true, false],
+        [611, true, false],
+      ])
+        await pool.query(
+          'INSERT INTO "BidProject" ("projectId",title,payload,available,"hasApplied","updatedAt") VALUES ($1,$2,$3,$4,$5,now())',
+          [
+            id,
+            `Project ${id}`,
+            { id, title: `Project ${id}`, status: "published" },
+            available,
+            applied,
+          ],
+        );
+      const rows = [
+        [611, "CONFIRMED", "selected"],
+        [703, "FAILED", null],
+        [704, "UNKNOWN", null],
+        [705, "CONFIRMED", "rejected"],
+        [706, "CONFIRMED", "applied"],
+        [707, "GENERATING", null],
+      ];
+      for (let i = 0; i < rows.length; i++) {
+        const [id, state, status] = rows[i];
+        await pool.query(
+          'INSERT INTO "BidApplication" (id,"projectId",title,state,status,"submittedAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [
+            `bid-${id}`,
+            id,
+            `Project ${id}`,
+            state,
+            status,
+            new Date(Date.UTC(2026, 10, 20, 10, i)),
+            new Date(Date.UTC(2026, 10, 20, 11, 10 - i)),
+          ],
+        );
+      }
+      const listing = await request(
+        "/bids?projectFilter=available&applicationFilter=all&limit=1&projectPage=2&applicationPage=2",
+      );
+      assert.equal(listing.status, 200);
+      assert.deepEqual(
+        listing.data.projects.map((p) => p.projectId),
+        [700],
+      );
+      assert.deepEqual(
+        listing.data.applications.map((p) => p.projectId),
+        [706],
+      );
+      assert.equal(listing.data.projectTotal, 2);
+      assert.equal(listing.data.applicationTotal, 6);
+      assert.equal(listing.data.counts.projects.archive, 4);
+      assert.equal(listing.data.counts.applications.confirmed, 3);
+      assert.equal(listing.data.counts.applications.selected, 1);
+      const archive = (await request("/bids?projectFilter=archive&limit=100"))
+        .data;
+      assert.deepEqual(
+        archive.projects.map((p) => p.projectId),
+        [704, 702, 701, 611],
+      );
+      for (const [filter, ids] of [
+        ["selected", [611]],
+        ["rejected", [705]],
+        ["failed", [703]],
+        ["unknown", [704]],
+        ["processing", [707]],
+        ["applied", [706]],
+      ])
+        assert.deepEqual(
+          (
+            await request(`/bids?applicationFilter=${filter}`)
+          ).data.applications.map((a) => a.projectId),
+          ids,
+        );
+      const before = (await request("/bids?limit=100")).data.applications.map(
+        (a) => a.projectId,
+      );
+      await pool.query(
+        'UPDATE "BidApplication" SET "updatedAt"=now() WHERE "projectId"=611',
+      );
+      assert.deepEqual(
+        (await request("/bids?limit=100")).data.applications.map(
+          (a) => a.projectId,
+        ),
+        before,
+      );
+      assert.equal(
+        (await request("/bids?focusProject=702")).data.projects[0].projectId,
+        702,
+      );
+      assert.equal(
+        (await request("/bids?applicationFilter=invalid")).status,
+        400,
+      );
+      assert.equal((await request("/bids?projectPage=0")).status, 400);
+      assert.equal(mock.aiCalls, 0);
+      assert.equal(mock.bidPosts.length, 0);
+    });
     test("bid discovery requires authentication and never generates or submits without confirmation", async () => {
       const p = await prepareBid();
       assert.equal(
@@ -1164,9 +1267,13 @@ describe(
         project_id: 1000 + i,
         status: "applied",
         project: { title: "Manual " + i },
+        created_at: new Date(Date.UTC(2026, 10, 20, 10, i)).toISOString(),
       }));
       assert.equal((await request("/bids/refresh", "POST")).status, 201);
       assert.equal((await request("/bids")).data.applicationTotal, 16);
+      const imported = (await request("/bids")).data.applications[0];
+      assert.equal(imported.projectId, 1015);
+      assert.equal(imported.submittedAt, "2026-11-20T10:15:00.000Z");
       assert.equal(mock.messages.length, 0);
       mock.bids[15].status = "accepted";
       mock.failGowa = true;

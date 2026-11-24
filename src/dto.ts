@@ -60,6 +60,40 @@ export class PageDto {
   @ApiPropertyOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit =
     15;
 }
+export class BidsQueryDto extends PageDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  focusProject?: number;
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  projectPage?: number;
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  applicationPage?: number;
+  @ApiPropertyOptional() @IsIn(["all", "available", "archive"]) projectFilter =
+    "all";
+  @ApiPropertyOptional()
+  @IsIn([
+    "all",
+    "confirmed",
+    "selected",
+    "rejected",
+    "applied",
+    "failed",
+    "unknown",
+    "processing",
+  ])
+  applicationFilter = "all";
+}
 export class LogQueryDto extends PageDto {
   @ApiPropertyOptional()
   @IsOptional()
