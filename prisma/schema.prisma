@@ -28,6 +28,7 @@ model Configuration {
   gowaPasswordEncrypted String?
   deviceId              String   @default("personal")
   authAlerts            Boolean  @default(true)
+  autoBid               Boolean  @default(true)
   updatedAt             DateTime @updatedAt
 }
 
@@ -110,6 +111,7 @@ model BidApplication {
   title           String
   upstreamId      Int?             @unique
   state           String
+  source          String           @default("MANUAL")
   status          String?
   proposalPayload Json?
   lastError       String?
@@ -122,6 +124,19 @@ model BidApplication {
   attempts        BidAttempt[]
 
   @@index([submittedAt, id])
+}
+
+model BidDraft {
+  projectId       Int      @id
+  version         String
+  state           String
+  isDevelopment   Boolean  @default(false)
+  reason          String?
+  proposalPayload Json?
+  lastError       String?
+  autoAttempted   Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }
 
 model BidAttempt {

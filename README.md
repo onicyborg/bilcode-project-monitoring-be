@@ -87,13 +87,26 @@ Koneksi pool database dibatasi 10 detik saat menghubungkan/mengambil koneksi dan
 
 Panduan branch, GitHub Environment secrets, Neon development, serta deployment Docker tersedia di [deploy/README.md](deploy/README.md).
 
-## Pengajuan bid dengan satu konfirmasi
+## Analisis proyek, draft, dan bid otomatis
 
 Generator menyertakan [panduan Humanizer-zh yang diadaptasi ke bahasa Indonesia](docs/humanizer-zh/README.md) untuk menyunting gaya sebelum JSON akhir dikembalikan. Panduan mengurangi pengulangan dan ungkapan template sambil mempertahankan lingkup, syarat, dan fakta. Tetap satu panggilan model; tidak ada jaminan lolos detektor AI. Tidak perlu environment tambahan.
 
 Penolakan eksplisit POST dengan HTTP 400/401/403/404/405/410/422 dicatat FAILED, lengkap dengan tahap, status HTTP, kode mesin, dan nama field validasi yang dikenal. Respons mentah upstream tidak dicatat. Hanya HTTP 401 memicu refresh/invalidation autentikasi; 403 tidak membuktikan token kedaluwarsa. Error koneksi, 5xx, konflik 409, atau rekonsiliasi yang gagal tetap UNKNOWN setelah pengiriman dimulai. File proposal lokal bukan bukti bid diterima; hanya pencocokan `my-bids` menetapkan CONFIRMED.
 
 Pesan penolakan Bilcode yang dikenali untuk ketidakcocokan bidang keahlian dipetakan ke kode `BID_SKILL_MISMATCH`. Panel menampilkan penjelasan untuk memeriksa bidang pada profil Bilcode. Ini penolakan izin bisnis, bukan kesalahan AI atau sesi login. Sistem tidak mengubah bidang keahlian akun secara otomatis. Proyek yang muncul pada daftar available belum tentu memenuhi seluruh syarat pengajuan akun.
+
+
+### Alur otomatis
+
+Migrasi `20261124100000_bid_drafts_and_automation` menambahkan `BidDraft`, `BidApplication.source` dan `Configuration.autoBid` (default **true**, sesuai aktivasi fitur). Deploy backend beserta migrasi sebelum frontend; tidak ada environment baru selain `VIKEY_API_KEY` yang sudah digunakan. Monitoring yang berhenti tetap berhenti setelah migrasi. Untuk menonaktifkan pengiriman otomatis, hentikan monitoring, nonaktifkan **Bid otomatis pengembangan sistem** di Konfigurasi, simpan, lalu mulai kembali.
+
+Setiap proyek published yang belum dilamar dan belum memiliki pengajuan lokal dianalisis dalam satu panggilan model: `{is_system_development:boolean, reason:string, bid:{...payload}}`. Tidak ada filter bidang/tech stack sebelum AI. Pengembangan web/mobile/backend/API/integrasi, bug fixing, redesign aplikasi, dan penambahan fitur termasuk pengembangan sistem. Lingkup nonpengembangan atau ambigu menunggu persetujuan operator. Semua hasil harus lolos validasi klasifikasi dan proposal sebelum disimpan READY. Jika deadline tidak jelas atau terlalu dekat, draft FAILED dan tidak ada pengiriman.
+
+Draft disimpan untuk setiap versi lingkup. Proyek nonpengembangan tetap memiliki draft untuk pengajuan manual tanpa AI ulang. Draft gagal/interupsi hanya dicoba lagi dengan persetujuan manual; tidak menghabiskan panggilan AI setiap polling. Draft yang durasinya melampaui sisa deadline perlu diperbarui saat konfirmasi. Perubahan lingkup menghasilkan versi baru dan meminta konfirmasi baru bila operator memakai versi lama. `GET /api/bids` menyertakan draft, alasan, status, dan konfigurasi autoBid.
+
+Ketika monitoring terjadwal berjalan dan autoBid aktif, draft pengembangan sistem yang READY dapat memicu satu upaya pengajuan. Penanda `autoAttempted` disimpan sebelum pemeriksaan/pengiriman; restart atau polling tidak mencoba otomatis lagi, termasuk kegagalan dan perubahan lingkup setelah upaya pertama. Pengajuan lokal lama tidak diproses otomatis. Pemeriksaan riwayat, ketersediaan, versi, dan deadline tetap dijalankan sebelum POST. Penolakan karena bidang keahlian akun tetap berlaku. Pengecekan sekali saat worker berhenti hanya menyiapkan draft; tombol Sinkronkan hanya memperbarui data dan notifikasi. Keduanya tidak memicu bid otomatis.
+
+Ringkasan teks mendahului JSON untuk notifikasi proyek baru, hasil pengajuan otomatis, dan perubahan/pencatatan status bid. Ringkasan memakai data terstruktur, tanpa panggilan AI tambahan. JSON tetap berupa teks dalam code fence dan dibagi menjadi beberapa pesan bila panjang. Peringatan autentikasi/pemulihan dan pesan uji tidak berubah. Antrean/progres pengiriman tetap persisten; pesan lama yang sudah mengantre mempertahankan format asalnya.
 
 ### Filter daftar proyek dan penawaran
 
@@ -119,7 +132,7 @@ Tambahkan `VIKEY_API_KEY` pada environment backend. Untuk deployment, tambahkan 
 
 - `GET /api/bids?page=1&limit=10` membaca cache dan riwayat lokal, tanpa menghubungi AI atau mengajukan bid.
 - `POST /api/bids/refresh` menyinkronkan proyek dan seluruh halaman `my-bids`, serta mencoba notifikasi tertunda. Sesi Bilcode harus valid.
-- `POST /api/bids/projects/:id/submit` menerima `{ "confirmed": true, "version": "HASH_DARI_GET_BIDS" }`. Konfirmasi mengizinkan AI menyusun dan langsung mengirim, tanpa tinjau draft. Semuanya memerlukan JWT panel; POST juga memerlukan Origin yang terdaftar.
+- `POST /api/bids/projects/:id/submit` menerima `{ "confirmed": true, "version": "HASH_DARI_GET_BIDS" }`. Konfirmasi mengirim draft tersimpan yang masih valid, tanpa generate ulang. Bila draft belum ada/gagal atau lingkup berubah, AI menyusunnya dahulu. Semuanya memerlukan JWT panel; POST juga memerlukan Origin yang terdaftar.
 
 Sistem memeriksa riwayat bid dan proyek terbaru sebelum analisis, lalu memeriksa ulang proyek sebelum POST. Perubahan lingkup meminta konfirmasi ulang. Proposal AI divalidasi: struktur wajib lengkap, estimasi hari konsisten dan tidak melewati deadline. `proposed_amount` dipaksa **0** mengikuti payload Bilcode yang sudah diuji; fitur ini belum menentukan harga pekerjaan. Judul, deskripsi, deadline, dan teknologi proyek dikirim ke Vikey; cookie, token Bilcode, dan credential GOWA tidak dikirim ke AI.
 

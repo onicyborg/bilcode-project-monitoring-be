@@ -54,6 +54,7 @@ export class SettingsDto {
   gowaPassword?: string;
   @ApiProperty() @Matches(/^[a-zA-Z0-9._-]{1,80}$/) deviceId!: string;
   @ApiProperty() @IsBoolean() authAlerts!: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() autoBid?: boolean;
 }
 export class PageDto {
   @ApiPropertyOptional() @Type(() => Number) @IsInt() @Min(1) page = 1;

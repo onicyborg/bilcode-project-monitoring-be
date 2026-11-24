@@ -15,13 +15,15 @@ import { Audit } from "./audit";
 import { SettingsDto } from "./dto";
 import { isRecord, Upstream, UpstreamError } from "./upstream";
 import { CheckRun, Configuration, Prisma } from "./generated/prisma/client";
+import { projectSummary } from "./notification-summary";
 
-export function jsonMessages(project: unknown) {
+export function jsonMessages(project: unknown, summarize = true) {
   const text = JSON.stringify(project, null, 2).replace(/`/g, "\\u0060");
   const characters = Array.from(text);
   const pieces: string[] = [];
-  for (let i = 0; i < characters.length; i += 3500)
-    pieces.push(characters.slice(i, i + 3500).join(""));
+  const chunkSize = summarize ? 2800 : 3500;
+  for (let i = 0; i < characters.length; i += chunkSize)
+    pieces.push(characters.slice(i, i + chunkSize).join(""));
   const id =
     isRecord(project) && Number.isSafeInteger(project.id)
       ? Number(project.id)
@@ -30,11 +32,11 @@ export function jsonMessages(project: unknown) {
     ",",
   )[0];
   const link = id
-    ? `\nBuka proyek & konfirmasi penawaran: ${origin}/bids?project=${id}`
+    ? `\nLihat proyek & penawaran: ${origin}/bids?project=${id}`
     : "";
   return pieces.map(
     (piece, i) =>
-      `Proyek Bilcode baru${pieces.length > 1 ? ` (${i + 1}/${pieces.length})` : ""}\n\`\`\`\n${piece}\n\`\`\`${i === pieces.length - 1 ? link : ""}`,
+      `Proyek Bilcode baru${pieces.length > 1 ? ` (${i + 1}/${pieces.length})` : ""}${i === 0 && summarize ? `\n${projectSummary(project)}` : ""}\n\`\`\`\n${piece}\n\`\`\`${i === pieces.length - 1 ? link : ""}`,
   );
 }
 
@@ -791,6 +793,14 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
         });
         newProjects += inserted.count;
       }
+      await this.bids.processDiscovered(
+        projects,
+        { ...config, autoBid: config.autoBid && !manual },
+        (request) => this.authorized(request, signal),
+        async () =>
+          this.bids.rememberProjects(await this.fetchProjects(signal)),
+        signal,
+      );
       const pending = await this.db.notification.findMany({
         where: { status: { not: "SENT" } },
         orderBy: { createdAt: "asc" },
@@ -830,6 +840,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
           throw error;
         }
       }
+      await this.bids.notify(config, signal);
       await this.db.checkRun.update({
         where: { id: run.id },
         data: {
@@ -985,12 +996,15 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
     try {
       await this.upstream.send(
         config,
-        jsonMessages({
-          dummy: true,
-          source: "bilcode-project-monitoring",
-          message: "Uji pengiriman dari panel lokal.",
-          time: new Date().toISOString(),
-        })[0],
+        jsonMessages(
+          {
+            dummy: true,
+            source: "bilcode-project-monitoring",
+            message: "Uji pengiriman dari panel lokal.",
+            time: new Date().toISOString(),
+          },
+          false,
+        )[0],
       );
       await this.audit.record(
         "TEST_MESSAGE_SENT",
