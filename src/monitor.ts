@@ -130,6 +130,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
       connectionString:
         process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL,
       keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
       connectionTimeoutMillis: 15000,
     });
     await this.lease.connect();
@@ -142,14 +143,7 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
       );
     this.leaseHealthy = true;
     await this.bids.recover();
-    this.lease.on("error", () => {
-      this.leaseHealthy = false;
-      this.pauseRequested = true;
-      clearTimeout(this.timer);
-      this.controller?.abort();
-      console.error("Monitoring lease connection lost; monitoring halted.");
-      process.kill(process.pid, "SIGTERM");
-    });
+    this.lease.on("error", (error) => this.leaseLost(error));
     await this.db.configuration.upsert({
       where: { id: "main" },
       update: {},
@@ -194,6 +188,39 @@ export class Monitor implements OnModuleInit, OnModuleDestroy {
     this.controller?.abort();
     await this.inFlight?.catch(() => undefined);
     await this.lease?.end();
+  }
+  isLeaseHealthy() {
+    return this.leaseHealthy;
+  }
+  private leaseLost(error: unknown) {
+    if (!this.leaseHealthy) return;
+    this.leaseHealthy = false;
+    this.pauseRequested = true;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.controller?.abort();
+    const code =
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      [
+        "ECONNRESET",
+        "ETIMEDOUT",
+        "EPIPE",
+        "EAI_AGAIN",
+        "ENOTFOUND",
+        "57P01",
+        "57P02",
+        "57P03",
+      ].includes(String(error.code))
+        ? String(error.code)
+        : "CONNECTION_LOST";
+    console.error(
+      `Monitoring lease connection lost (${code}); restarting backend.`,
+    );
+    // A hung database operation may prevent Nest shutdown hooks from completing.
+    setTimeout(() => process.exit(1), 10000).unref();
+    process.kill(process.pid, "SIGTERM");
   }
   private async exclusive<T>(work: () => Promise<T>): Promise<T> {
     let release!: () => void;

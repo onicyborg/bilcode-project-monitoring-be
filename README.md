@@ -83,6 +83,8 @@ Migrasi JWT mengakhiri sesi panel lama sehingga operator perlu login sekali lagi
 
 ## GitHub Actions dan VPS
 
+Koneksi pool database dibatasi 10 detik saat menghubungkan/mengambil koneksi dan 15 detik saat menunggu query, dengan TCP keepalive. Koneksi lock worker memakai keepalive dan jalur direct. Jika lock terputus, worker membatalkan operasi aktif dan meminta shutdown; batas paksa 10 detik memastikan proses keluar meskipun shutdown hook tertahan database, sehingga restart policy Docker dapat memulihkannya. Health mengembalikan 503 saat lock tidak sehat atau probe database melewati 3 detik. Restart tidak mengirim ulang bid yang ambigu; pemulihan status tetap mengikuti `my-bids`.
+
 Panduan branch, GitHub Environment secrets, Neon development, serta deployment Docker tersedia di [deploy/README.md](deploy/README.md).
 
 ## Pengajuan bid dengan satu konfirmasi
