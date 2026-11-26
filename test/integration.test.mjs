@@ -943,6 +943,10 @@ describe(
         (await request("/bids")).data.projects[0].draft.state,
         "FAILED",
       );
+      assert.match(
+        (await request("/bids")).data.projects[0].draft.lastError,
+        /AI_OUTPUT_INVALID/,
+      );
       assert.equal(mock.bidPosts.length, 0);
       await runScheduledCycle();
       assert.equal(mock.aiCalls, 1);
