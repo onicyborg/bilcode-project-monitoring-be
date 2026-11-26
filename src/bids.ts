@@ -16,6 +16,7 @@ import { Configuration, Prisma } from "./generated/prisma/client";
 import { proposalStyle } from "./proposal-style";
 import { bidAction, safeResponse } from "./bid-response";
 import { bidSummary } from "./notification-summary";
+import { draftFailure } from "./draft-failure";
 
 type Authorized = <T>(request: (token: string) => Promise<T>) => Promise<T>;
 const model = "deepseek/deepseek-v4.1-flash-1017";
@@ -477,7 +478,7 @@ export class Bids {
         where: { projectId },
         data: {
           state: "FAILED",
-          lastError: `Analisis belum berhasil. ${upstreamDiagnostic(error)}. Konfirmasi manual untuk mencoba kembali.`,
+          lastError: draftFailure(error, signal.aborted),
         },
       });
       throw error;
@@ -572,7 +573,7 @@ export class Bids {
         }
         await this.audit.record(
           "BID_AUTOMATION_SKIPPED",
-          `Proyek #${projectId}: proses otomatis dihentikan; periksa draft/riwayat. ${upstreamDiagnostic(error)}`,
+          `Proyek #${projectId}: proses otomatis dihentikan; periksa draft/riwayat. ${claimedDraft?.state === "FAILED" ? claimedDraft.lastError : upstreamDiagnostic(error)}`,
           "WARNING",
         );
       }
